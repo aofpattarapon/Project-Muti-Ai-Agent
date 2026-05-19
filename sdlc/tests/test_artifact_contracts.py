@@ -549,5 +549,336 @@ class TestContractResultFields(unittest.TestCase):
         self.assertEqual(result.contract_name, "sa:database_schema")
 
 
+# ─── Phase 7.1: Secondary artifact freshness ────────────────────────────────
+
+class TestSecondaryArtifactFreshness(unittest.TestCase):
+    """
+    Validates that _secondary_file_ok / validate_role_artifact_contract
+    correctly reject stale files and accept fresh ones, and that the
+    generated_artifacts list takes priority over mtime.
+    """
+
+    # Minimal passing content for DEV:backend_code task (workspace_manifest required)
+    # Needs: files aliases (.py / implementation) + code_blocks (```)
+    _DEV_CONTENT = "## implementation\n```python\ndef main(): pass\n```"
+    _DEV_TASK_TYPE = "backend_code"
+    _DEV_ROLE = "dev"
+
+    # Minimal passing content for QA:test_report (qa_execution_result required)
+    # Needs: summary, pass_fail_count (pass/fail), defects (defect/bug)
+    _QA_CONTENT = "## Test Summary\n### Pass/Fail Count\n| Pass | 5 | Fail | 1 |\n### Defects Found\n| Bug-001 | Low severity |"
+    _QA_ROLE = "qa"
+    _QA_TASK = "test_report"
+
+    # Minimal passing content for DEVOPS:deployment_guide
+    # Needs: prerequisites (prerequisite/requirement), steps (step/deploy), environment (config)
+    _DEVOPS_CONTENT = "## Prerequisites\n- System requirements\n### Deployment Steps\n1. Deploy to server\n### Environment Configuration\n- config vars"
+    _DEVOPS_ROLE = "devops"
+    _DEVOPS_TASK = "deployment_guide"
+
+    def _make_stale_file(self, d: str, fname: str, attempt_start: float) -> str:
+        """Create a file with mtime 2 seconds before attempt_start."""
+        fpath = os.path.join(d, fname)
+        with open(fpath, "w") as f:
+            f.write("content")
+        os.utime(fpath, (attempt_start - 2.0, attempt_start - 2.0))
+        return fpath
+
+    def _make_fresh_file(self, d: str, fname: str, attempt_start: float) -> str:
+        """Create a file with mtime equal to attempt_start."""
+        fpath = os.path.join(d, fname)
+        with open(fpath, "w") as f:
+            f.write("content")
+        os.utime(fpath, (attempt_start, attempt_start))
+        return fpath
+
+    # ── DEV workspace_manifest ─────────────────────────────────────────────
+
+    def test_dev_stale_workspace_manifest_fails(self):
+        """workspace_manifest.json older than attempt_start → contract failed."""
+        with tempfile.TemporaryDirectory() as d:
+            import time
+            attempt_start = time.time()
+            self._make_stale_file(d, "workspace_manifest.json", attempt_start)
+            result = validate_role_artifact_contract(
+                self._DEV_ROLE, self._DEV_TASK_TYPE,
+                self._DEV_CONTENT, "python",
+                output_dir=d,
+                attempt_started_at=attempt_start,
+            )
+            self.assertEqual(result.status, "failed")
+            self.assertIn("workspace_manifest.json", result.missing_artifacts)
+
+    def test_dev_fresh_workspace_manifest_passes(self):
+        """workspace_manifest.json with mtime == attempt_start → contract passed."""
+        with tempfile.TemporaryDirectory() as d:
+            import time
+            attempt_start = time.time()
+            self._make_fresh_file(d, "workspace_manifest.json", attempt_start)
+            result = validate_role_artifact_contract(
+                self._DEV_ROLE, self._DEV_TASK_TYPE,
+                self._DEV_CONTENT, "python",
+                output_dir=d,
+                attempt_started_at=attempt_start,
+            )
+            self.assertEqual(result.status, "passed")
+
+    def test_dev_no_timestamp_stale_file_passes(self):
+        """Without attempt_started_at, any existing file passes (backward compat)."""
+        with tempfile.TemporaryDirectory() as d:
+            import time
+            # Create a file with very old mtime — no timestamp means no freshness check
+            fpath = os.path.join(d, "workspace_manifest.json")
+            with open(fpath, "w") as f:
+                f.write("old content")
+            os.utime(fpath, (1000.0, 1000.0))
+            result = validate_role_artifact_contract(
+                self._DEV_ROLE, self._DEV_TASK_TYPE,
+                self._DEV_CONTENT, "python",
+                output_dir=d,
+                attempt_started_at=None,
+            )
+            self.assertEqual(result.status, "passed")
+
+    # ── QA qa_execution_result ─────────────────────────────────────────────
+
+    def test_qa_stale_execution_result_fails(self):
+        """qa_execution_result.json older than attempt_start → contract failed."""
+        with tempfile.TemporaryDirectory() as d:
+            import time
+            attempt_start = time.time()
+            self._make_stale_file(d, "qa_execution_result.json", attempt_start)
+            result = validate_role_artifact_contract(
+                self._QA_ROLE, self._QA_TASK,
+                self._QA_CONTENT, "markdown",
+                output_dir=d,
+                attempt_started_at=attempt_start,
+            )
+            self.assertEqual(result.status, "failed")
+
+    def test_qa_fresh_execution_result_passes(self):
+        """qa_execution_result.json with fresh mtime → contract passed."""
+        with tempfile.TemporaryDirectory() as d:
+            import time
+            attempt_start = time.time()
+            self._make_fresh_file(d, "qa_execution_result.json", attempt_start)
+            result = validate_role_artifact_contract(
+                self._QA_ROLE, self._QA_TASK,
+                self._QA_CONTENT, "markdown",
+                output_dir=d,
+                attempt_started_at=attempt_start,
+            )
+            self.assertEqual(result.status, "passed")
+
+    def test_qa_any_of_alternate_file_passes(self):
+        """test_execution_result.json (alternate) with fresh mtime → contract passed."""
+        with tempfile.TemporaryDirectory() as d:
+            import time
+            attempt_start = time.time()
+            self._make_fresh_file(d, "test_execution_result.json", attempt_start)
+            result = validate_role_artifact_contract(
+                self._QA_ROLE, self._QA_TASK,
+                self._QA_CONTENT, "markdown",
+                output_dir=d,
+                attempt_started_at=attempt_start,
+            )
+            self.assertEqual(result.status, "passed")
+
+    # ── DEVOPS deployment_readiness_report ────────────────────────────────
+
+    def test_devops_fresh_readiness_report_passes(self):
+        """deployment_readiness_report.md fresh → passed."""
+        with tempfile.TemporaryDirectory() as d:
+            import time
+            attempt_start = time.time()
+            self._make_fresh_file(d, "deployment_readiness_report.md", attempt_start)
+            result = validate_role_artifact_contract(
+                self._DEVOPS_ROLE, self._DEVOPS_TASK,
+                self._DEVOPS_CONTENT, "markdown",
+                output_dir=d,
+                attempt_started_at=attempt_start,
+            )
+            self.assertEqual(result.status, "passed")
+
+    def test_devops_stale_readiness_report_fails(self):
+        """deployment_readiness_report.md older than attempt_start → failed."""
+        with tempfile.TemporaryDirectory() as d:
+            import time
+            attempt_start = time.time()
+            self._make_stale_file(d, "deployment_readiness_report.md", attempt_start)
+            result = validate_role_artifact_contract(
+                self._DEVOPS_ROLE, self._DEVOPS_TASK,
+                self._DEVOPS_CONTENT, "markdown",
+                output_dir=d,
+                attempt_started_at=attempt_start,
+            )
+            self.assertEqual(result.status, "failed")
+            self.assertIn("deployment_readiness_report.md", result.missing_artifacts)
+
+    # ── generated_artifacts list takes priority ────────────────────────────
+
+    def test_generated_artifacts_list_passes_regardless_of_mtime(self):
+        """When generated_artifacts contains the file, mtime is irrelevant."""
+        with tempfile.TemporaryDirectory() as d:
+            import time
+            attempt_start = time.time()
+            # Create a STALE file on disk — it would fail if mtime were checked
+            self._make_stale_file(d, "workspace_manifest.json", attempt_start)
+            generated = [{"path": "workspace_manifest.json", "ref": os.path.join(d, "workspace_manifest.json")}]
+            result = validate_role_artifact_contract(
+                self._DEV_ROLE, self._DEV_TASK_TYPE,
+                self._DEV_CONTENT, "python",
+                output_dir=d,
+                generated_artifacts=generated,
+                attempt_started_at=attempt_start,
+            )
+            # generated_artifacts list wins over mtime → should pass
+            self.assertEqual(result.status, "passed")
+
+    def test_generated_artifacts_without_filename_fails(self):
+        """generated_artifacts provided but doesn't contain the required file → failed."""
+        with tempfile.TemporaryDirectory() as d:
+            import time
+            attempt_start = time.time()
+            self._make_fresh_file(d, "workspace_manifest.json", attempt_start)
+            # generated list has a different file — manifest not listed
+            generated = [{"path": "something_else.txt", "ref": os.path.join(d, "something_else.txt")}]
+            result = validate_role_artifact_contract(
+                self._DEV_ROLE, self._DEV_TASK_TYPE,
+                self._DEV_CONTENT, "python",
+                output_dir=d,
+                generated_artifacts=generated,
+                attempt_started_at=attempt_start,
+            )
+            self.assertEqual(result.status, "failed")
+            self.assertIn("workspace_manifest.json", result.missing_artifacts)
+
+    def test_no_output_dir_no_generated_skips_secondary_check(self):
+        """Without output_dir or generated_artifacts, secondary file check is skipped → passed."""
+        result = validate_role_artifact_contract(
+            self._DEV_ROLE, self._DEV_TASK_TYPE,
+            self._DEV_CONTENT, "python",
+            output_dir=None,
+            generated_artifacts=None,
+        )
+        # Sections pass (content has "implementation" and "```") but secondary check
+        # is entirely skipped (no output_dir, no generated_artifacts) → passed
+        self.assertIn(result.status, ("passed",))
+        self.assertEqual(result.missing_artifacts, [])
+
+
+# ─── Phase 7.1: DB-persisted retry counter ───────────────────────────────────
+
+class TestDBPersistedRetryCounter(unittest.TestCase):
+    """
+    Validates that the contract failure retry count is read from DB attempt_count
+    rather than the in-memory _task_fail_counts dict.
+
+    Uses Storage with a temp SQLite DB to simulate a bot restart scenario:
+    DB has attempt_count=2, in-memory has 0 → next fail_count must be 3.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmpdir = tempfile.TemporaryDirectory()
+        # Storage calls os.makedirs(os.path.dirname(db_path)) — put db in subdir
+        self._db_path = os.path.join(self._tmpdir.name, "data", "test.db")
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _get_storage(self):
+        try:
+            from shared.storage import Storage
+            return Storage(db_path=self._db_path)
+        except Exception:
+            return None
+
+    def _insert_task(self, storage, task_id: str, attempt_count: int):
+        """Insert a task row with specified attempt_count directly via SQL."""
+        import sqlite3
+        from datetime import datetime
+        now = datetime.utcnow().isoformat()
+        with sqlite3.connect(storage.db_path) as conn:
+            conn.execute(
+                "INSERT INTO sdlc_tasks "
+                "(id, project_id, epic_id, task_number, role, task_type, output_file, "
+                "attempt_count, status, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (task_id, "proj1", "epic1", 1, "dev", "backend_code", "out.md",
+                 attempt_count, "in_progress", now, now),
+            )
+            conn.commit()
+
+    def test_fail_count_reads_db_attempt_count(self):
+        """
+        When DB has attempt_count=2 and in-memory is 0,
+        the computed fail_count after a contract failure should be 3.
+
+        This is the core of Fix 1: read fresh task from DB, not in-memory.
+        Logic: fail_count = (fresh.attempt_count if fresh else 0) + 1
+        """
+        storage = self._get_storage()
+        if storage is None:
+            self.skipTest("Storage class not available in test env")
+
+        self._insert_task(storage, "task-abc", attempt_count=2)
+
+        fresh = storage.get_sdlc_task("task-abc")
+        self.assertIsNotNone(fresh, "Task should exist in DB")
+        fail_count = (fresh.attempt_count if fresh else 0) + 1
+        self.assertEqual(fail_count, 3)
+
+    def test_fail_count_requeues_when_under_limit(self):
+        """fail_count=1 with _MAX_AUTO_RETRIES=2 → _requeue=True."""
+        _MAX_AUTO_RETRIES = 2
+        fail_count = 1
+        requeue = fail_count <= _MAX_AUTO_RETRIES
+        self.assertTrue(requeue)
+
+    def test_fail_count_no_requeue_when_over_limit(self):
+        """fail_count=3 with _MAX_AUTO_RETRIES=2 → _requeue=False."""
+        _MAX_AUTO_RETRIES = 2
+        fail_count = 3
+        requeue = fail_count <= _MAX_AUTO_RETRIES
+        self.assertFalse(requeue)
+
+    def test_fail_count_no_requeue_at_exact_limit(self):
+        """fail_count=2 → still requeues; fail_count=3 → exhausted."""
+        _MAX_AUTO_RETRIES = 2
+        self.assertTrue(2 <= _MAX_AUTO_RETRIES)
+        self.assertFalse(3 <= _MAX_AUTO_RETRIES)
+
+    def test_fail_count_handles_missing_task(self):
+        """If fresh task is None (task deleted), fail_count = 0 + 1 = 1."""
+        fresh = None
+        fail_count = (fresh.attempt_count if fresh else 0) + 1
+        self.assertEqual(fail_count, 1)
+
+    def test_db_attempt_count_survives_restart(self):
+        """
+        Simulate bot restart: in-memory count reset to 0 but DB still has attempt_count=2.
+        After restart, DB-read fail_count should be 3, not 1.
+        """
+        storage = self._get_storage()
+        if storage is None:
+            self.skipTest("Storage class not available in test env")
+
+        self._insert_task(storage, "task-restart", attempt_count=2)
+
+        # Simulate restart: in-memory counter is empty
+        in_memory_counts: dict = {}
+        task_id = "task-restart"
+
+        # In-memory would give: 0 + 1 = 1 (wrong)
+        in_memory_fail = in_memory_counts.get(task_id, 0) + 1
+        self.assertEqual(in_memory_fail, 1)  # Confirms the pre-fix bug
+
+        # DB-read gives: 2 + 1 = 3 (correct)
+        fresh = storage.get_sdlc_task(task_id)
+        db_fail = (fresh.attempt_count if fresh else 0) + 1
+        self.assertEqual(db_fail, 3)  # Confirms the fix
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

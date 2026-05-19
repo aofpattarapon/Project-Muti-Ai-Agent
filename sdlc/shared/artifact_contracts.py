@@ -457,12 +457,35 @@ def _section_present(content: str, aliases: list[str]) -> bool:
     return False
 
 
-def _secondary_file_ok(output_dir: str, spec: str | dict) -> bool:
-    """Check one secondary file spec against output_dir."""
-    if isinstance(spec, str):
-        return os.path.isfile(os.path.join(output_dir, spec))
-    if isinstance(spec, dict) and "any" in spec:
-        return any(os.path.isfile(os.path.join(output_dir, f)) for f in spec["any"])
+def _secondary_file_ok(
+    output_dir: str,
+    spec: "str | dict",
+    generated_names: Optional[frozenset] = None,
+    attempt_started_at: Optional[float] = None,
+) -> bool:
+    """
+    Check one secondary file spec for freshness.
+
+    Priority order:
+    1. generated_names provided → check filename membership (exact set from artifact collector)
+    2. attempt_started_at provided → file must exist AND mtime >= attempt_started_at
+    3. Neither → just check file exists (backward-compatible)
+
+    spec may be a string (single required filename) or {"any": [filename, ...]}
+    meaning at least one of the listed files must satisfy the check.
+    """
+    candidates: list[str] = [spec] if isinstance(spec, str) else (
+        spec.get("any", []) if isinstance(spec, dict) else []
+    )
+    for fname in candidates:
+        if generated_names is not None:
+            if fname in generated_names:
+                return True
+        else:
+            fpath = os.path.join(output_dir, fname)
+            if os.path.isfile(fpath):
+                if attempt_started_at is None or os.path.getmtime(fpath) >= attempt_started_at:
+                    return True
     return False
 
 
@@ -472,9 +495,21 @@ def validate_role_artifact_contract(
     content: str,
     output_format: str,  # noqa: ARG001 — reserved for future format-specific checks
     output_dir: Optional[str] = None,
+    generated_artifacts: Optional[list] = None,
+    attempt_started_at: Optional[float] = None,
 ) -> ContractValidationResult:
     """
-    Validate that content + output_dir satisfy the role/task_type artifact contract.
+    Validate that content + artifacts satisfy the role/task_type artifact contract.
+
+    Parameters:
+        generated_artifacts : list of artifact dicts from _collect_artifacts()
+            e.g. [{"type": "workspace_manifest", "path": "workspace_manifest.json",
+                   "ref": "/full/path/workspace_manifest.json"}]
+            When provided, secondary file checks use this set exclusively —
+            stale files left in output_dir from prior attempts are ignored.
+        attempt_started_at  : wall-clock seconds (time.time()) marking when the
+            current attempt began. Used as mtime lower-bound when
+            generated_artifacts is absent. Prevents stale files from passing.
 
     Returns:
         status="skipped"  — no contract defined for this role/task_type
@@ -493,11 +528,31 @@ def validate_role_artifact_contract(
         if not _section_present(content, req["aliases"]):
             missing_sections.append(req["name"])
 
+    # Build filename set from explicit artifact list when provided
+    _gen_names: Optional[frozenset] = None
+    if generated_artifacts is not None:
+        _gen_names = frozenset(
+            name
+            for a in generated_artifacts
+            for name in filter(None, [
+                a.get("path") or "",
+                os.path.basename(a.get("ref", "")) if a.get("ref") else "",
+            ])
+        )
+
     missing_artifacts: list[str] = []
-    if output_dir:
+    _check_secondary = (output_dir is not None) or (_gen_names is not None)
+    if _check_secondary:
         for spec in contract.get("secondary_files", []):
-            if not _secondary_file_ok(output_dir, spec):
-                fname = spec if isinstance(spec, str) else "/".join(spec.get("any", []))
+            if not _secondary_file_ok(
+                output_dir or "",
+                spec,
+                _gen_names,
+                attempt_started_at,
+            ):
+                fname = spec if isinstance(spec, str) else "/".join(
+                    spec.get("any", [])
+                )
                 missing_artifacts.append(fname)
 
     if missing_sections or missing_artifacts:
