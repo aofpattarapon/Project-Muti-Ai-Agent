@@ -20,6 +20,9 @@ GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 TOKEN    = os.getenv("CEO_DISCORD_TOKEN", "")
 BULK_CUTOFF = datetime.now(timezone.utc) - timedelta(days=13, hours=23)
 
+# ชื่อที่มี keyword เหล่านี้จะถูกข้าม (case-insensitive)
+SKIP_KEYWORDS = ["log"]
+
 
 async def purge_channel(channel: discord.TextChannel) -> int:
     """Purge a channel using bulk-delete where possible, fallback to single-delete."""
@@ -86,6 +89,9 @@ async def purge():
         print(f"🔍 Found {len(channels)} text channels in {guild.name}\n")
 
         for channel in channels:
+            if any(kw in channel.name.lower() for kw in SKIP_KEYWORDS):
+                print(f"  ⏭️  #{channel.name}: skipped (log channel)")
+                continue
             total += await purge_channel(channel)
 
         print(f"\n🎉 Done — {total} total messages deleted across all channels.")
@@ -95,8 +101,9 @@ async def purge():
 
 
 if __name__ == "__main__":
-    print("⚠️  This will delete ALL messages in ALL channels.")
+    print("⚠️  This will delete messages in all channels EXCEPT log channels.")
     print(f"   Guild: {GUILD_ID}")
+    print(f"   Skip keywords: {SKIP_KEYWORDS}")
     confirm = input("   Type 'yes' to proceed: ").strip().lower()
     if confirm == "yes":
         asyncio.run(purge())
