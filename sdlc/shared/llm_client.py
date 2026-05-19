@@ -115,7 +115,7 @@ class LLMClient:
             # 2. If role unknown, use static fallback chain
             # Inject DNA into fallback free models for quality continuity
 
-            tried_providers = {provider}
+            tried_keys = {self.model_key}
             fallback_tried = False
             _last_err_str = str(primary_err).lower()
 
@@ -130,7 +130,7 @@ class LLMClient:
                     for k, cfg in _MODELS.items()
                     if cfg.tier == _MT.FREE
                     and cfg.provider in available_providers
-                    and cfg.provider not in tried_providers
+                    and k not in tried_keys
                 ]
                 free_candidates.sort(key=lambda x: x[2], reverse=True)
                 # Append cheap models as last resort
@@ -139,7 +139,7 @@ class LLMClient:
                     for k, cfg in _MODELS.items()
                     if cfg.tier == _MT.CHEAP
                     and cfg.provider in available_providers
-                    and cfg.provider not in tried_providers
+                    and k not in tried_keys
                     and (cfg.provider != "openai" or os.getenv("OPENAI_API_KEY"))
                 ]
                 cheap_candidates.sort(key=lambda x: x[2], reverse=True)
@@ -153,12 +153,12 @@ class LLMClient:
                     ("ollama/hermes3",                MODELS.get("ollama/hermes3"),               2),
                 ]
                 ranked_fallbacks = [(k, cfg, s) for k, cfg, s in ranked_fallbacks
-                                    if cfg and cfg.provider not in tried_providers]
+                                    if cfg and k not in tried_keys]
 
             for fb_key, fb_cfg, fb_score in ranked_fallbacks:
                 if not fb_cfg:
                     continue
-                tried_providers.add(fb_cfg.provider)
+                tried_keys.add(fb_key)
 
                 # Map provider to caller
                 _caller_map = {
