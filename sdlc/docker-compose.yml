@@ -1,0 +1,175 @@
+version: "3.9"
+
+# ============================================================
+# Multi-AI-Agent SDLC System — Docker Compose
+# 10 Agents + PostgreSQL + pgAdmin
+# ============================================================
+
+x-agent-base: &agent-base
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  env_file: .env
+  volumes:
+    - ./outputs:/app/outputs
+    - ./data:/app/data
+    - .:/app/src:ro
+  networks:
+    - sdlc-network
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+
+  # ─── PostgreSQL ────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: sdlc-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sdlc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sdlcpass}
+      POSTGRES_DB: ${POSTGRES_DB:-sdlc_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - sdlc-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sdlc}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── pgAdmin (DB GUI) ──────────────────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: sdlc-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@sdlc.local
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+    ports:
+      - "5050:80"
+    networks:
+      - sdlc-network
+    depends_on:
+      - postgres
+
+  # ─── DB Init ──────────────────────────────────────────────────
+  db-init:
+    <<: *agent-base
+    container_name: sdlc-db-init
+    command: python -c "from shared.storage import Storage; from shared.timelog import TimeLogger; Storage(); TimeLogger(); print('DB initialized')"
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ─── CEO Agent ────────────────────────────────────────────────
+  ceo-agent:
+    <<: *agent-base
+    container_name: sdlc-ceo
+    command: python -m agents.ceo.agent
+    environment:
+      - AGENT_ROLE=ceo
+
+  # ─── PM Agent ─────────────────────────────────────────────────
+  pm-agent:
+    <<: *agent-base
+    container_name: sdlc-pm
+    command: python -m agents.pm.agent
+    environment:
+      - AGENT_ROLE=pm
+
+  # ─── BA Agent ─────────────────────────────────────────────────
+  ba-agent:
+    <<: *agent-base
+    container_name: sdlc-ba
+    command: python -m agents.ba.agent
+    environment:
+      - AGENT_ROLE=ba
+
+  # ─── SA Agent ─────────────────────────────────────────────────
+  sa-agent:
+    <<: *agent-base
+    container_name: sdlc-sa
+    command: python -m agents.sa.agent
+    environment:
+      - AGENT_ROLE=sa
+
+  # ─── UXUI Agent ───────────────────────────────────────────────
+  uxui-agent:
+    <<: *agent-base
+    container_name: sdlc-uxui
+    command: python -m agents.uxui.agent
+    environment:
+      - AGENT_ROLE=uxui
+
+  # ─── FRONTEND Agent (NEW) ─────────────────────────────────────
+  frontend-agent:
+    <<: *agent-base
+    container_name: sdlc-frontend
+    command: python -m agents.frontend.agent
+    environment:
+      - AGENT_ROLE=frontend
+
+  # ─── BACKEND Agent (NEW) ──────────────────────────────────────
+  backend-agent:
+    <<: *agent-base
+    container_name: sdlc-backend
+    command: python -m agents.backend.agent
+    environment:
+      - AGENT_ROLE=backend
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-sdlc}:${POSTGRES_PASSWORD:-sdlcpass}@postgres:5432/${POSTGRES_DB:-sdlc_db}
+
+  # ─── QA Agent ─────────────────────────────────────────────────
+  qa-agent:
+    <<: *agent-base
+    container_name: sdlc-qa
+    command: python -m agents.qa.agent
+    environment:
+      - AGENT_ROLE=qa
+
+  # ─── DEVOPS Agent ─────────────────────────────────────────────
+  devops-agent:
+    <<: *agent-base
+    container_name: sdlc-devops
+    command: python -m agents.devops.agent
+    environment:
+      - AGENT_ROLE=devops
+    volumes:
+      - ./outputs:/app/outputs
+      - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # ─── Ollama (Local LLM) ───────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: sdlc-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - sdlc-network
+    # สำหรับ GPU (Apple Silicon / NVIDIA):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - capabilities: [gpu]
+
+volumes:
+  postgres_data:
+  ollama_data:
+
+networks:
+  sdlc-network:
+    driver: bridge
+    name: sdlc-network

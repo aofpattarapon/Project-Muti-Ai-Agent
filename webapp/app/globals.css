@@ -1,0 +1,267 @@
+@import "tailwindcss";
+
+:root {
+  --background: #080e1a;
+  --foreground: #f8fafc;
+  --panel: #0f1829;
+  --panel-elevated: #162035;
+  --sidebar: #0c1423;
+  --border-soft: rgba(255, 255, 255, 0.07);
+  --muted: #64748b;
+  --primary: #4f8cff;
+  --accent: #f43f5e;
+  --ok: #24e08a;
+  --bad: #ff5c5c;
+  --warn: #f59e0b;
+}
+
+.dark {
+  --background: #050b14;
+  --foreground: #e2e8f0;
+  --panel: #0a1120;
+  --panel-elevated: #111b2e;
+  --sidebar: #080f1c;
+  --border-soft: rgba(255, 255, 255, 0.07);
+  --muted: #64748b;
+  --primary: #4f8cff;
+  --accent: #f43f5e;
+  --ok: #24e08a;
+  --bad: #ff5c5c;
+  --warn: #f59e0b;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  margin: 0;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(circle at top left, rgba(79, 140, 255, 0.10), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(36, 224, 138, 0.06), transparent 26%),
+    linear-gradient(180deg, #070d1a 0%, #040b14 100%);
+  pointer-events: none;
+  z-index: -1;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+.material-panel {
+  background: linear-gradient(180deg, rgba(26, 32, 53, 0.98) 0%, rgba(19, 25, 42, 0.98) 100%);
+  border: 1px solid var(--border-soft);
+  box-shadow: 0 24px 60px -32px rgba(2, 6, 23, 0.9);
+}
+
+.material-panel-soft {
+  background: linear-gradient(180deg, rgba(32, 41, 64, 0.96) 0%, rgba(24, 31, 50, 0.96) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.material-title {
+  color: #f8fafc;
+  letter-spacing: -0.03em;
+}
+
+.material-muted {
+  color: var(--muted);
+}
+
+.material-chip {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.material-action {
+  background: linear-gradient(135deg, var(--primary) 0%, #2f6df6 100%);
+  box-shadow: 0 16px 36px -18px rgba(79, 140, 255, 0.65);
+}
+
+/* ─── OpenClaw-aligned utilities ──────────────────────────────── */
+
+/* Status text */
+.ok-text  { color: var(--ok);  }
+.bad-text { color: var(--bad); }
+.warn-text{ color: var(--warn);}
+
+/* Inputs / selects / textareas — always dark */
+.oc-input {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  color: #e2e8f0;
+  border-radius: 0.75rem;
+  padding: 0.75rem 1rem;
+  font-size: 0.875rem;
+  outline: none;
+  transition: border-color 0.15s;
+  width: 100%;
+}
+.oc-input:focus {
+  border-color: rgba(255, 255, 255, 0.22);
+}
+.oc-input::placeholder {
+  color: rgba(255, 255, 255, 0.22);
+}
+select.oc-input option {
+  background: #0f1829;
+  color: #e2e8f0;
+}
+
+/* Buttons */
+.oc-btn-ghost {
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.04);
+  color: #94a3b8;
+  padding: 0.5rem 1.1rem;
+  border-radius: 9999px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  cursor: pointer;
+}
+.oc-btn-ghost:hover {
+  border-color: rgba(255, 255, 255, 0.20);
+  background: rgba(255, 255, 255, 0.07);
+  color: #fff;
+}
+.oc-btn-ghost:disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.oc-btn-action {
+  background: linear-gradient(135deg, #4f8cff 0%, #2f6df6 100%);
+  box-shadow: 0 12px 28px -16px rgba(79, 140, 255, 0.55);
+  color: #fff;
+  padding: 0.65rem 1.4rem;
+  border-radius: 9999px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.1s;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.oc-btn-action:hover { opacity: 0.88; }
+.oc-btn-action:active { transform: translateY(1px); }
+.oc-btn-action:disabled { opacity: 0.4; pointer-events: none; }
+
+.oc-btn-ok {
+  background: rgba(36, 224, 138, 0.12);
+  border: 1px solid rgba(36, 224, 138, 0.30);
+  color: #24e08a;
+  padding: 0.5rem 1.1rem;
+  border-radius: 9999px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.oc-btn-ok:hover { background: rgba(36, 224, 138, 0.20); }
+
+.oc-btn-danger {
+  border: 1px solid rgba(255, 92, 92, 0.28);
+  background: rgba(255, 92, 92, 0.07);
+  color: #ff5c5c;
+  padding: 0.4rem 1.1rem;
+  border-radius: 9999px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.oc-btn-danger:hover { background: rgba(255, 92, 92, 0.14); }
+
+/* Badge */
+.oc-badge {
+  display: inline-block;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #64748b;
+  padding: 0.15rem 0.65rem;
+  border-radius: 9999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.oc-badge-ok {
+  background: rgba(36, 224, 138, 0.1);
+  border-color: rgba(36, 224, 138, 0.3);
+  color: var(--ok);
+}
+.oc-badge-warn {
+  background: rgba(245, 158, 11, 0.1);
+  border-color: rgba(245, 158, 11, 0.3);
+  color: var(--warn);
+}
+.oc-badge-bad {
+  background: rgba(255, 92, 92, 0.1);
+  border-color: rgba(255, 92, 92, 0.3);
+  color: var(--bad);
+}
+
+/* Log / mono display */
+.oc-log {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 0.75rem;
+  padding: 0.75rem 1rem;
+  color: #94a3b8;
+  white-space: pre-wrap;
+}
+
+/* Table */
+.oc-table { width: 100%; font-size: 0.875rem; }
+.oc-table thead tr { border-bottom: 1px solid rgba(255,255,255,0.06); }
+.oc-table thead th {
+  padding: 0.6rem 1rem;
+  text-align: left;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: #475569;
+}
+.oc-table tbody tr { border-bottom: 1px solid rgba(255,255,255,0.04); }
+.oc-table tbody tr:last-child { border-bottom: none; }
+.oc-table tbody td { padding: 0.7rem 1rem; color: #94a3b8; }
+.oc-table tbody td.oc-td-primary { color: #e2e8f0; font-weight: 500; }
