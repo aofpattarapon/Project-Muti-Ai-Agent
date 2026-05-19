@@ -1497,21 +1497,39 @@ class BaseAgent(ABC):
         import time as _time
         _start_ts = _time.monotonic()
         _start_wall_ts = _time.time()  # wall-clock for mtime comparison in contract freshness check
-        if output_ch:
-            async with output_ch.typing():
+        try:
+            if output_ch:
+                async with output_ch.typing():
+                    content = await self.call_llm(
+                        prompt=prompt,
+                        project_id=task.project_id,
+                        project_name=project_name,
+                        force_model_key=_preferred_model_key,
+                    )
+            else:
                 content = await self.call_llm(
                     prompt=prompt,
                     project_id=task.project_id,
                     project_name=project_name,
                     force_model_key=_preferred_model_key,
                 )
-        else:
-            content = await self.call_llm(
-                prompt=prompt,
-                project_id=task.project_id,
-                project_name=project_name,
-                force_model_key=_preferred_model_key,
-            )
+        except Exception as _llm_exc:
+            from shared.llm_error_classifier import classify_llm_error
+            _err_info = classify_llm_error(_llm_exc)
+            if _err_info.is_quota_error:
+                # Pause task — do not consume retry budget for provider issues
+                await self._pause_task_for_quota(
+                    task=task,
+                    project_name=project_name,
+                    err_info=_err_info,
+                    model_key=_preferred_model_key or routing.get("model_id", ""),
+                    output_ch=output_ch,
+                    log_id=log_id,
+                    estimated_cost=routing.get("estimated_cost", 0.0),
+                    actual_model=self._last_actual_model_key or routing.get("model_id", "unknown"),
+                )
+                return  # handled — do not propagate
+            raise  # non-quota error: let poll loop handle normally
         _duration = _time.monotonic() - _start_ts
         # actual_model reflects fallback if the primary model failed mid-call
         _actual_model = self._last_actual_model_key or routing.get("model_id", "unknown")
@@ -1763,6 +1781,113 @@ class BaseAgent(ABC):
             )
 
         logger.info(f"[{self.role_name}] completed sdlc task {task.id} → {saved_path} (approval:{_approval_mode})")
+
+    # ─── Phase 8: Quota/Provider Pause helper ──────────────────────────────
+
+    async def _pause_task_for_quota(
+        self,
+        task,
+        project_name: str,
+        err_info,
+        model_key: str,
+        output_ch,
+        log_id: str,
+        estimated_cost: float,
+        actual_model: str,
+    ):
+        """
+        Pause an SDLC task when all LLM fallbacks fail due to quota/rate/provider issues.
+
+        - Writes paused status + pause metadata to DB (clears claim so recovery can requeue)
+        - Registers provider cooldown
+        - Notifies Discord output channel
+        - Sends Web App paused event (no approval_item created)
+        - Closes the timelog entry
+        """
+        import time as _time
+        from datetime import timedelta
+        from shared.channel_config import ROLE_CHANNELS
+
+        # Compute retry_after timestamp
+        retry_s = err_info.retry_after_seconds or 3600
+        retry_after_at = (
+            datetime.utcnow() + timedelta(seconds=retry_s)
+        ).isoformat()
+
+        # Determine provider from model_key or err_info hint
+        provider = err_info.provider_hint
+        if not provider and "/" in model_key:
+            provider = model_key.split("/")[0]
+
+        # 1. Persist pause state
+        self.storage.pause_sdlc_task_for_provider(
+            task_id=task.id,
+            reason=err_info.error_type,
+            provider=provider,
+            model=model_key,
+            retry_after_at=retry_after_at,
+            error=err_info.raw_message,
+            resume_policy=err_info.resume_policy,
+        )
+
+        # 2. Register provider cooldown so router avoids it
+        if provider:
+            self.storage.set_provider_cooldown(
+                provider=provider,
+                model=model_key,
+                reason=err_info.error_type,
+                retry_after_at=retry_after_at,
+            )
+
+        # 3. Discord notification (no approval needed)
+        if output_ch:
+            _policy_note = " — **manual key rotation required**" if err_info.is_manual else ""
+            await output_ch.send(
+                f"⏸️ **Task Paused** — `{task.id}` (`{task.task_type}`)\n"
+                f"**Reason:** {err_info.error_type} on `{model_key}`{_policy_note}\n"
+                f"**Resume after:** {retry_after_at[:19]} UTC\n"
+                f"**Error:** `{err_info.raw_message[:200]}`"
+            )
+
+        # 4. Web App notification (status=paused, no approval_item)
+        await get_bridge().task_completed(
+            role_key=self.role_name,
+            project_id=task.project_id,
+            project_name=project_name,
+            task_name=task.title,
+            summary=(
+                f"⏸️ Task paused: {err_info.error_type} on {provider or model_key}. "
+                f"Resume after {retry_after_at[:19]} UTC."
+            ),
+            files=[],
+            model_id=actual_model,
+            cost_usd=estimated_cost,
+            duration_seconds=0.0,
+            sdlc_task_id=task.id,
+            status="paused",
+            extra_metadata=dict(
+                pause_reason=err_info.error_type,
+                pause_provider=provider,
+                pause_model=model_key,
+                retry_after_at=retry_after_at,
+                resume_policy=err_info.resume_policy,
+                error=err_info.raw_message,
+            ),
+        )
+
+        # 5. Close timelog
+        self.timelog.finish(
+            log_id=log_id,
+            model_used=actual_model,
+            cost_usd=estimated_cost,
+            output_files=[],
+            status="paused",
+        )
+
+        logger.warning(
+            f"[{self.role_name}] task {task.id} paused ({err_info.error_type}) "
+            f"provider={provider} retry_after={retry_after_at[:19]}"
+        )
 
     def _build_sdlc_context(self, task: SdlcTask, project_name: str, input_data: dict) -> dict:
         """รวบรวม context จาก dependency tasks + input_data สำหรับ prompt"""

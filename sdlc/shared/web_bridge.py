@@ -163,6 +163,7 @@ class WebAppBridge:
         artifacts: Optional[list] = None,
         error_info: str = "",
         contract_info: Optional[dict] = None,
+        extra_metadata: Optional[dict] = None,
     ):
         """Agent ทำเสร็จ — status default = waiting_approval (role_tasks) หรือ completed (sdlc_tasks)"""
         artifact_url = (
@@ -200,6 +201,8 @@ class WebAppBridge:
                 "artifact_url":     artifact_url,
                 # Artifact contract validation result
                 **(contract_info or {}),
+                # Additional caller-supplied metadata (e.g. pause info)
+                **(extra_metadata or {}),
             },
         })
 
