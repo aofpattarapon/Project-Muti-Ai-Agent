@@ -162,6 +162,7 @@ class WebAppBridge:
         fallback_used: bool = False,
         artifacts: Optional[list] = None,
         error_info: str = "",
+        contract_info: Optional[dict] = None,
     ):
         """Agent ทำเสร็จ — status default = waiting_approval (role_tasks) หรือ completed (sdlc_tasks)"""
         artifact_url = (
@@ -197,6 +198,8 @@ class WebAppBridge:
                 "error_info":       error_info,
                 "completed_at":     datetime.utcnow().isoformat() + "Z",
                 "artifact_url":     artifact_url,
+                # Artifact contract validation result
+                **(contract_info or {}),
             },
         })
 
