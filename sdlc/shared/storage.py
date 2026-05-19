@@ -516,8 +516,8 @@ class Storage:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
                 "UPDATE sdlc_tasks SET status='in_progress', claimed_by=?, claimed_at=?, updated_at=? "
-                "WHERE id=? AND status='pending'",
-                (role, now, now, task_id),
+                "WHERE id=? AND role=? AND status='pending'",
+                (role, now, now, task_id, role),
             )
             conn.commit()
         return cursor.rowcount == 1
@@ -535,6 +535,65 @@ class Storage:
             conn.execute(
                 "UPDATE sdlc_tasks SET status=?, attempt_count=?, last_error=?, notes=?, updated_at=? WHERE id=?",
                 (status, attempt_count, error[:500], notes, now, task_id),
+            )
+            conn.commit()
+
+    def recover_stale_sdlc_tasks(self, role: str, max_age_minutes: int = 60, max_retries: int = 2) -> list:
+        """Re-queue or permanently fail tasks stuck in in_progress too long.
+
+        Only touches tasks for the given role that have a non-empty claimed_at
+        (tasks without claimed_at pre-date tracking and are left alone).
+        Returns list of (task_id, new_status) tuples so the caller can log them.
+        """
+        from datetime import timedelta
+        now = datetime.utcnow()
+        cutoff = (now - timedelta(minutes=max_age_minutes)).isoformat()
+        recovered = []
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT id, attempt_count FROM sdlc_tasks "
+                "WHERE role=? AND status='in_progress' AND claimed_at != '' AND claimed_at < ?",
+                (role, cutoff),
+            ).fetchall()
+            for task_id, attempt_count in rows:
+                note = (
+                    f"Stale recovery at {now.isoformat()[:19]} "
+                    f"(stuck in_progress > {max_age_minutes}m)"
+                )
+                if (attempt_count or 0) < max_retries:
+                    conn.execute(
+                        "UPDATE sdlc_tasks SET status='pending', claimed_at='', claimed_by='', "
+                        "notes=?, updated_at=? WHERE id=?",
+                        (note, now.isoformat(), task_id),
+                    )
+                    recovered.append((task_id, "pending"))
+                else:
+                    conn.execute(
+                        "UPDATE sdlc_tasks SET status='failed', "
+                        "notes=?, updated_at=? WHERE id=?",
+                        (note + " — max retries exhausted", now.isoformat(), task_id),
+                    )
+                    recovered.append((task_id, "failed"))
+            if recovered:
+                conn.commit()
+        return recovered
+
+    def manual_retry_sdlc_task(self, task_id: str, notes: str = "Manual retry"):
+        """Re-queue a task for manual retry.
+
+        Clears claim fields and approval_msg_id so it can be re-claimed cleanly.
+        Preserves attempt_count for audit; appends the current count to notes.
+        """
+        now = datetime.utcnow().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT attempt_count FROM sdlc_tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            count_note = f" [attempt_count={row[0] if row else 0}]" if row else ""
+            conn.execute(
+                "UPDATE sdlc_tasks SET status='pending', claimed_at='', claimed_by='', "
+                "approval_msg_id='', notes=?, updated_at=? WHERE id=?",
+                (notes + count_note, now, task_id),
             )
             conn.commit()
 

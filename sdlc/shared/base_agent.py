@@ -508,10 +508,10 @@ class BaseAgent(ABC):
             if t.role != self.role_name:
                 await ctx.send(f"❌ Task นี้เป็นของ role `{t.role}` ไม่ใช่ `{self.role_name}`")
                 return
-            self.storage.update_sdlc_task_status(task_id, "pending", "Manual retry")
+            self.storage.manual_retry_sdlc_task(task_id, f"Manual retry by {ctx.author}")
             await ctx.send(
                 f"🔁 Re-queued `{task_id}` (`{t.task_type}`) → status=pending\n"
-                f"Bot จะรับไปทำใน poll loop ถัดไป (~15s)"
+                f"Claim fields cleared. Bot จะรับไปทำใน poll loop ถัดไป (~15s)"
             )
 
         @self.bot.command(name="sdlc_status")
@@ -1327,20 +1327,29 @@ class BaseAgent(ABC):
             await asyncio.sleep(15)
 
     async def _check_and_start_sdlc_tasks(self):
+        # Must have a guild to post Discord output — bail early so we never
+        # claim a task that we can't execute (which would leave it stuck in_progress).
+        guilds = self.bot.guilds
+        if not guilds:
+            logger.debug(f"[{self.role_name}] No guild connected — skipping sdlc task poll")
+            return
+
+        # Recover tasks that were claimed but never finished (e.g. bot crashed mid-task)
+        for task_id, new_status in self.storage.recover_stale_sdlc_tasks(self.role_name):
+            logger.warning(f"[{self.role_name}] Stale task recovered: {task_id} → {new_status}")
+
         tasks = self.storage.list_pending_sdlc_tasks(self.role_name)
         for task in tasks:
             if task.id in self._running_task_ids:
                 continue
-            # DB-level atomic claim — guards against duplicate execution across restarts
-            # and multiple bot instances. In-memory set above is a fast pre-check only.
+            # DB-level atomic claim (also verifies role match) — guards against
+            # duplicate execution across restarts and multiple bot instances.
             if not self.storage.claim_sdlc_task(task.id, self.role_name):
-                continue  # lost the race to another process
+                continue  # lost the race, or role mismatch
             self._running_task_ids.add(task.id)
             try:
-                guilds = self.bot.guilds
-                if guilds:
-                    logger.info(f"[{self.role_name}] starting sdlc task {task.id} ({task.task_type})")
-                    await self._execute_sdlc_task(task, guilds[0])
+                logger.info(f"[{self.role_name}] starting sdlc task {task.id} ({task.task_type})")
+                await self._execute_sdlc_task(task, guilds[0])
             except Exception as e:
                 _MAX_AUTO_RETRIES = 2
                 # Prefer persisted attempt_count so restarts don't reset the counter
@@ -1359,17 +1368,15 @@ class BaseAgent(ABC):
                     logger.error(f"[{self.role_name}] sdlc task {task.id} FAILED after {fail_count} attempts: {err_msg}")
                     self.storage.record_sdlc_task_error(task.id, err_msg, fail_count, requeue=False)
                     self._task_fail_counts.pop(task.id, None)
-                    guilds = self.bot.guilds
-                    if guilds:
-                        role_ch = ROLE_CHANNELS.get(self.role_name)
-                        if role_ch:
-                            out_ch = await get_guild_channel(guilds[0], role_ch.output)
-                            if out_ch:
-                                await out_ch.send(
-                                    f"💥 **Task Failed** — `{task.id}` (`{task.task_type}`)\n"
-                                    f"Failed after {fail_count} attempts. Use `!sdlc_retry {task.id}` to re-queue.\n"
-                                    f"Error: `{err_msg}`"
-                                )
+                    role_ch = ROLE_CHANNELS.get(self.role_name)
+                    if role_ch:
+                        out_ch = await get_guild_channel(guilds[0], role_ch.output)
+                        if out_ch:
+                            await out_ch.send(
+                                f"💥 **Task Failed** — `{task.id}` (`{task.task_type}`)\n"
+                                f"Failed after {fail_count} attempts. Use `!sdlc_retry {task.id}` to re-queue.\n"
+                                f"Error: `{err_msg}`"
+                            )
             finally:
                 self._running_task_ids.discard(task.id)
 
@@ -1447,6 +1454,9 @@ class BaseAgent(ABC):
         _duration = _time.monotonic() - _start_ts
         # actual_model reflects fallback if the primary model failed mid-call
         _actual_model = self._last_actual_model_key or routing.get("model_id", "unknown")
+        # Cost is a routing estimate — actual cost is accumulated in LLMClient.tracker
+        # and accessible via /usage. Do not present as exact billing.
+        _estimated_cost_usd = routing.get("estimated_cost", 0.0)
 
         # ─── Save output file ────────────────────────────────────────
         output_dir = os.path.join(
@@ -1464,7 +1474,7 @@ class BaseAgent(ABC):
         finished = self.timelog.finish(
             log_id=log_id,
             model_used=_actual_model,
-            cost_usd=routing.get("estimated_cost", 0.0),
+            cost_usd=_estimated_cost_usd,
             output_files=[task.output_file],
             status="done",
         )
@@ -1534,7 +1544,7 @@ class BaseAgent(ABC):
             summary=f"[{task.task_type}] {content[:300].replace(chr(10), ' ')}",
             files=[task.output_file],
             model_id=_actual_model,
-            cost_usd=routing.get("estimated_cost", 0.0),
+            cost_usd=_estimated_cost_usd,
             duration_seconds=round(_duration, 1),
             revision_count=task.revision_count,
             artifact_ref=saved_path,

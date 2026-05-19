@@ -196,5 +196,204 @@ class TestApprovalStatusUpdate(unittest.TestCase):
         self.assertEqual(t.notes, "Approved by web-ui")
 
 
+class TestClaimRoleCheck(unittest.TestCase):
+    """claim_sdlc_task must reject if role doesn't match."""
+
+    def setUp(self):
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self._tmp.close()
+        self.storage = Storage(db_path=self._tmp.name)
+
+    def tearDown(self):
+        os.unlink(self._tmp.name)
+
+    def test_role_mismatch_returns_false(self):
+        _task(self.storage, "T-001", "pending")  # role="ba"
+        result = self.storage.claim_sdlc_task("T-001", "dev")  # wrong role
+        self.assertFalse(result, "Claim by wrong role must fail")
+
+    def test_role_mismatch_leaves_status_pending(self):
+        _task(self.storage, "T-001", "pending")
+        self.storage.claim_sdlc_task("T-001", "dev")
+        t = self.storage.get_sdlc_task("T-001")
+        self.assertEqual(t.status, "pending", "Status must stay pending after wrong-role claim")
+
+    def test_correct_role_still_wins(self):
+        _task(self.storage, "T-001", "pending")
+        self.storage.claim_sdlc_task("T-001", "dev")  # wrong role — fails
+        result = self.storage.claim_sdlc_task("T-001", "ba")  # correct role
+        self.assertTrue(result)
+        t = self.storage.get_sdlc_task("T-001")
+        self.assertEqual(t.claimed_by, "ba")
+
+
+class TestStaleRecovery(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self._tmp.close()
+        self.storage = Storage(db_path=self._tmp.name)
+
+    def tearDown(self):
+        os.unlink(self._tmp.name)
+
+    def _claim_and_age(self, task_id: str, minutes_ago: int, attempt_count: int = 0):
+        """Helper: create an in_progress task with a backdated claimed_at."""
+        from datetime import timedelta
+        old_ts = (datetime.utcnow() - timedelta(minutes=minutes_ago)).isoformat()
+        now = datetime.utcnow().isoformat()
+        t = SdlcTask(
+            id=task_id, project_id="proj-1", epic_id="proj-1-E001", task_number=1,
+            role="ba", task_type="brd", title=f"Task {task_id}", description="",
+            output_file="out.md", output_format="markdown", depends_on="",
+            status="in_progress", input_data="{}", output_data="{}",
+            approval_msg_id="", revision_count=0, notes="",
+            created_at=now, updated_at=now,
+            attempt_count=attempt_count, claimed_at=old_ts, claimed_by="ba",
+        )
+        self.storage.create_sdlc_task(t)
+
+    def test_stale_task_requeued(self):
+        self._claim_and_age("T-001", minutes_ago=90)
+        recovered = self.storage.recover_stale_sdlc_tasks("ba", max_age_minutes=60)
+        self.assertEqual(recovered, [("T-001", "pending")])
+        t = self.storage.get_sdlc_task("T-001")
+        self.assertEqual(t.status, "pending")
+        self.assertEqual(t.claimed_at, "")
+        self.assertEqual(t.claimed_by, "")
+
+    def test_fresh_task_not_recovered(self):
+        self._claim_and_age("T-001", minutes_ago=10)
+        recovered = self.storage.recover_stale_sdlc_tasks("ba", max_age_minutes=60)
+        self.assertEqual(recovered, [])
+        t = self.storage.get_sdlc_task("T-001")
+        self.assertEqual(t.status, "in_progress")
+
+    def test_stale_with_max_retries_fails_permanently(self):
+        self._claim_and_age("T-001", minutes_ago=90, attempt_count=2)
+        recovered = self.storage.recover_stale_sdlc_tasks("ba", max_age_minutes=60, max_retries=2)
+        self.assertEqual(recovered, [("T-001", "failed")])
+        t = self.storage.get_sdlc_task("T-001")
+        self.assertEqual(t.status, "failed")
+
+    def test_no_claimed_at_skipped(self):
+        """Tasks without claimed_at (pre-dating tracking) must not be touched."""
+        now = datetime.utcnow().isoformat()
+        t = SdlcTask(
+            id="T-OLD", project_id="proj-1", epic_id="proj-1-E001", task_number=1,
+            role="ba", task_type="brd", title="Old Task", description="",
+            output_file="out.md", output_format="markdown", depends_on="",
+            status="in_progress", input_data="{}", output_data="{}",
+            approval_msg_id="", revision_count=0, notes="",
+            created_at=now, updated_at=now,
+            attempt_count=0, claimed_at="", claimed_by="",  # empty = pre-tracking
+        )
+        self.storage.create_sdlc_task(t)
+        recovered = self.storage.recover_stale_sdlc_tasks("ba", max_age_minutes=0)
+        self.assertEqual(recovered, [], "Pre-tracking task must be skipped")
+
+    def test_waiting_approval_not_recovered(self):
+        now = datetime.utcnow().isoformat()
+        old_ts = "2020-01-01T00:00:00"
+        t = SdlcTask(
+            id="T-WA", project_id="proj-1", epic_id="proj-1-E001", task_number=1,
+            role="ba", task_type="brd", title="WA Task", description="",
+            output_file="out.md", output_format="markdown", depends_on="",
+            status="waiting_approval", input_data="{}", output_data="{}",
+            approval_msg_id="", revision_count=0, notes="",
+            created_at=now, updated_at=now,
+            attempt_count=0, claimed_at=old_ts, claimed_by="ba",
+        )
+        self.storage.create_sdlc_task(t)
+        recovered = self.storage.recover_stale_sdlc_tasks("ba", max_age_minutes=0)
+        self.assertEqual(recovered, [], "waiting_approval must never be recovered")
+
+    def test_approved_not_recovered(self):
+        now = datetime.utcnow().isoformat()
+        old_ts = "2020-01-01T00:00:00"
+        t = SdlcTask(
+            id="T-AP", project_id="proj-1", epic_id="proj-1-E001", task_number=1,
+            role="ba", task_type="brd", title="Approved Task", description="",
+            output_file="out.md", output_format="markdown", depends_on="",
+            status="approved", input_data="{}", output_data="{}",
+            approval_msg_id="", revision_count=0, notes="",
+            created_at=now, updated_at=now,
+            attempt_count=0, claimed_at=old_ts, claimed_by="ba",
+        )
+        self.storage.create_sdlc_task(t)
+        recovered = self.storage.recover_stale_sdlc_tasks("ba", max_age_minutes=0)
+        self.assertEqual(recovered, [])
+
+    def test_different_role_not_recovered(self):
+        self._claim_and_age("T-DEV", minutes_ago=90)  # role="ba"
+        recovered = self.storage.recover_stale_sdlc_tasks("dev", max_age_minutes=60)
+        self.assertEqual(recovered, [], "Recovery must only affect tasks for the given role")
+
+
+class TestManualRetry(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self._tmp.close()
+        self.storage = Storage(db_path=self._tmp.name)
+
+    def tearDown(self):
+        os.unlink(self._tmp.name)
+
+    def test_manual_retry_sets_pending(self):
+        _task(self.storage, "T-001", "failed")
+        self.storage.manual_retry_sdlc_task("T-001", "Manual retry by off")
+        t = self.storage.get_sdlc_task("T-001")
+        self.assertEqual(t.status, "pending")
+
+    def test_manual_retry_clears_claim_fields(self):
+        now = datetime.utcnow().isoformat()
+        t = SdlcTask(
+            id="T-001", project_id="proj-1", epic_id="proj-1-E001", task_number=1,
+            role="ba", task_type="brd", title="T", description="",
+            output_file="out.md", output_format="markdown", depends_on="",
+            status="failed", input_data="{}", output_data="{}",
+            approval_msg_id="msg-123", revision_count=0, notes="",
+            created_at=now, updated_at=now,
+            attempt_count=2, claimed_at="2024-01-01T00:00:00", claimed_by="ba",
+        )
+        self.storage.create_sdlc_task(t)
+        self.storage.manual_retry_sdlc_task("T-001", "Manual retry by off")
+        t = self.storage.get_sdlc_task("T-001")
+        self.assertEqual(t.claimed_at, "")
+        self.assertEqual(t.claimed_by, "")
+        self.assertEqual(t.approval_msg_id, "")
+
+    def test_manual_retry_preserves_attempt_count(self):
+        now = datetime.utcnow().isoformat()
+        t = SdlcTask(
+            id="T-001", project_id="proj-1", epic_id="proj-1-E001", task_number=1,
+            role="ba", task_type="brd", title="T", description="",
+            output_file="out.md", output_format="markdown", depends_on="",
+            status="failed", input_data="{}", output_data="{}",
+            approval_msg_id="", revision_count=0, notes="",
+            created_at=now, updated_at=now,
+            attempt_count=3, claimed_at="", claimed_by="",
+        )
+        self.storage.create_sdlc_task(t)
+        self.storage.manual_retry_sdlc_task("T-001", "Manual retry by off")
+        t = self.storage.get_sdlc_task("T-001")
+        self.assertEqual(t.attempt_count, 3, "attempt_count must be preserved for audit")
+
+    def test_manual_retry_notes_include_attempt_count(self):
+        now = datetime.utcnow().isoformat()
+        t = SdlcTask(
+            id="T-001", project_id="proj-1", epic_id="proj-1-E001", task_number=1,
+            role="ba", task_type="brd", title="T", description="",
+            output_file="out.md", output_format="markdown", depends_on="",
+            status="failed", input_data="{}", output_data="{}",
+            approval_msg_id="", revision_count=0, notes="",
+            created_at=now, updated_at=now,
+            attempt_count=2, claimed_at="", claimed_by="",
+        )
+        self.storage.create_sdlc_task(t)
+        self.storage.manual_retry_sdlc_task("T-001", "Manual retry by off")
+        t = self.storage.get_sdlc_task("T-001")
+        self.assertIn("attempt_count=2", t.notes)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
