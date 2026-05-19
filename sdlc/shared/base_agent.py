@@ -1458,6 +1458,42 @@ class BaseAgent(ABC):
         # and accessible via /usage. Do not present as exact billing.
         _estimated_cost_usd = routing.get("estimated_cost", 0.0)
 
+        # ─── Artifact Validation ─────────────────────────────────────
+        # Validate before saving so invalid output never reaches disk/approval.
+        from shared.artifact_validator import validate_artifact
+        _val_ok, _val_error = validate_artifact(content, task.output_format)
+        if not _val_ok:
+            _MAX_AUTO_RETRIES = 2
+            _fresh = self.storage.get_sdlc_task(task.id)
+            _fail_count = ((_fresh.attempt_count if _fresh else 0) + 1)
+            self._task_fail_counts[task.id] = _fail_count
+            logger.warning(
+                f"[{self.role_name}] Validation failed for {task.id} "
+                f"(attempt {_fail_count}): {_val_error}"
+            )
+            # Inject the validation error into input_data so the next LLM call
+            # knows exactly what to fix
+            self.storage.update_sdlc_task_input_data(
+                task.id,
+                {"revision_comment": f"[auto-validation] {_val_error}"},
+            )
+            _requeue = _fail_count <= _MAX_AUTO_RETRIES
+            self.storage.record_sdlc_task_error(
+                task.id, f"Validation failed: {_val_error}", _fail_count, requeue=_requeue
+            )
+            # Finish timelog so it doesn't hang open
+            self.timelog.finish(log_id=log_id, model_used=_actual_model,
+                                cost_usd=_estimated_cost_usd,
+                                output_files=[], status="validation_failed")
+            if output_ch:
+                _status_label = "🔁 will retry" if _requeue else "💥 max retries — marked failed"
+                await output_ch.send(
+                    f"⚠️ **Validation Failed** — `{task.id}` (`{task.task_type}`)\n"
+                    f"**Error:** {_val_error[:200]}\n"
+                    f"**Attempt:** {_fail_count}/{_MAX_AUTO_RETRIES + 1} — {_status_label}"
+                )
+            return
+
         # ─── Save output file ────────────────────────────────────────
         output_dir = os.path.join(
             os.getenv("OUTPUT_BASE_PATH", "/app/outputs"),

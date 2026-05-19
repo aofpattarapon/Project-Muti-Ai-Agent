@@ -525,16 +525,42 @@ class Storage:
     def record_sdlc_task_error(self, task_id: str, error: str, attempt_count: int, requeue: bool = True):
         """Persist retry state after a task failure.
 
-        requeue=True  → reset status to 'pending' so the poll loop retries
+        requeue=True  → reset status to 'pending', clear claim fields so it can
+                        be re-claimed cleanly on the next poll cycle
         requeue=False → set status to 'failed' (max retries exhausted)
         """
         now = datetime.utcnow().isoformat()
         status = "pending" if requeue else "failed"
         notes = f"Auto-retry {attempt_count}: {error[:300]}" if requeue else error[:300]
+        if requeue:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE sdlc_tasks SET status=?, attempt_count=?, last_error=?, notes=?, "
+                    "claimed_at='', claimed_by='', updated_at=? WHERE id=?",
+                    (status, attempt_count, error[:500], notes, now, task_id),
+                )
+                conn.commit()
+        else:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE sdlc_tasks SET status=?, attempt_count=?, last_error=?, notes=?, updated_at=? WHERE id=?",
+                    (status, attempt_count, error[:500], notes, now, task_id),
+                )
+                conn.commit()
+
+    def update_sdlc_task_input_data(self, task_id: str, input_data: dict):
+        """Merge new key/values into a task's input_data JSON (used to inject revision_comment)."""
+        now = datetime.utcnow().isoformat()
         with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT input_data FROM sdlc_tasks WHERE id=?", (task_id,)).fetchone()
+            try:
+                existing = json.loads(row[0] or "{}") if row else {}
+            except Exception:
+                existing = {}
+            existing.update(input_data)
             conn.execute(
-                "UPDATE sdlc_tasks SET status=?, attempt_count=?, last_error=?, notes=?, updated_at=? WHERE id=?",
-                (status, attempt_count, error[:500], notes, now, task_id),
+                "UPDATE sdlc_tasks SET input_data=?, updated_at=? WHERE id=?",
+                (json.dumps(existing), now, task_id),
             )
             conn.commit()
 
