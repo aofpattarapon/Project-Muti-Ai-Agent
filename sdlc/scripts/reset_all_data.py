@@ -13,8 +13,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 
-SDLC_DB = os.getenv("DB_PATH", "/home/socket9companylimited/projects/multi-ai-agent/sdlc/data/sdlc.db")
-WEBAPP_DB = "/home/socket9companylimited/projects/multi-ai-agent/webapp/data/multi-ai-agent-app.db"
+SDLC_DB = os.getenv("DB_PATH", os.path.expanduser("~/projects/multi-ai-agent/sdlc/data/sdlc.db"))
+WEBAPP_DB = os.getenv("WEBAPP_DB_PATH", os.path.expanduser("~/projects/multi-ai-agent/webapp/data/multi-ai-agent-app.db"))
 
 SDLC_CLEAR = ["sdlc_tasks", "epics", "role_tasks", "projects", "llm_usage", "time_logs"]
 WEBAPP_CLEAR = ["agent_activity_logs", "project_hot_cache", "approval_items", "audit_events"]
@@ -47,7 +47,7 @@ def main():
     reset_db(WEBAPP_DB, WEBAPP_CLEAR, "webapp")
 
     # Clear outputs directory (keep structure, delete files)
-    output_base = os.getenv("OUTPUT_BASE_PATH", "/home/socket9companylimited/projects/multi-ai-agent/sdlc/outputs")
+    output_base = os.getenv("OUTPUT_BASE_PATH", os.path.expanduser("~/projects/multi-ai-agent/sdlc/outputs"))
     projects_dir = os.path.join(output_base, "projects")
     if os.path.exists(projects_dir):
         import shutil
