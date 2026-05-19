@@ -1,10 +1,12 @@
 """
 QA Agent - Quality Assurance
 สร้าง QA documents + รัน real quality checks ก่อนสร้าง test_report
-ถ้าพบ critical/high bugs หรือ execution fail → ส่งกลับ DEV
+ถ้า execution failed → requeue DEV code tasks สำหรับ rework
+ถ้า execution blocked → human/DEVOPS intervention (ไม่ auto-route)
 """
 
 import json
+import logging
 import os
 import subprocess
 import tempfile
@@ -12,9 +14,11 @@ from typing import Optional
 
 from shared.base_agent import BaseAgent
 from shared.storage import Project, SdlcTask
-from shared.test_runner import run_quality_checks, format_execution_result
-
+from shared.test_runner import format_execution_result
+from agents.qa.execution_helper import QAExecutionHelper
 from agents.qa.prompts import QA_SYSTEM_PROMPT, build_qa_prompt
+
+logger = logging.getLogger(__name__)
 
 
 class QAAgent(BaseAgent):
@@ -77,121 +81,52 @@ class QAAgent(BaseAgent):
         }
 
     def _get_next_role_override(self, output_data: dict) -> Optional[str]:
-        """Route back to DEV if critical/high bugs found or execution failed."""
-        # Check execution result first
-        exec_result = (
-            self._last_execution_result
-            or output_data.get("qa_execution_result")
-        )
-        if exec_result and exec_result.get("status") == "failed":
-            return "dev"
-
-        # Original logic: route by bug severity
-        try:
-            bugs = int(output_data.get("bugs_found", 0) or 0)
-        except (ValueError, TypeError):
-            bugs = 0
-        if bugs <= 0:
-            return None
-        severity = output_data.get("severity_breakdown", {})
-        try:
-            critical = int(severity.get("critical", 0) or 0)
-            high     = int(severity.get("high", 0) or 0)
-        except (ValueError, TypeError):
-            critical = high = 0
-        if critical > 0 or high > 0:
-            return "dev"
-        return None
+        """Route back to DEV if critical/high bugs found or execution failed.
+        Note: blocked (timeout/infra) does NOT auto-route to DEV — needs human review."""
+        helper = QAExecutionHelper(self.storage)
+        return helper.get_role_override(output_data, self._last_execution_result)
 
     # ─── SDLC hooks ───────────────────────────────────────────────────────────
 
     async def _pre_llm_hook(self, task: SdlcTask, input_data: dict) -> dict:
-        """For test_report: run quality checks and return results as context."""
+        """For test_report: run quality checks and inject results into LLM context."""
         if task.task_type != "test_report":
             return {}
-
-        project_path = self._resolve_project_path(task, input_data)
-        result = run_quality_checks(project_path, timeout_seconds=60)
+        helper = QAExecutionHelper(self.storage)
+        result = helper.run_execution_checks(task, input_data)
         self._last_execution_result = result
-
         return {
             "qa_execution_result": result,
             "qa_execution_formatted": format_execution_result(result),
         }
 
     async def _post_save_hook(self, task: SdlcTask, output_dir: str) -> None:
-        """For test_report: save execution JSON artifact + inject DEV feedback if failed."""
+        """For test_report:
+        - Save qa_execution_result.json
+        - If failed: requeue DEV code tasks for rework
+        - If blocked: log warning for human/infra review (no auto-requeue)
+        """
         if task.task_type != "test_report" or not self._last_execution_result:
             return
 
-        # Save qa_execution_result.json alongside test_report
-        result_path = os.path.join(output_dir, "qa_execution_result.json")
-        try:
-            os.makedirs(output_dir, exist_ok=True)
-            with open(result_path, "w", encoding="utf-8") as fh:
-                json.dump(self._last_execution_result, fh, indent=2, ensure_ascii=False)
-        except Exception as exc:
-            import logging
-            logging.getLogger(__name__).warning(
-                f"[qa] could not save qa_execution_result.json: {exc}"
+        helper = QAExecutionHelper(self.storage)
+        helper.save_execution_artifact(task, output_dir, self._last_execution_result)
+
+        action = helper.decide_action(self._last_execution_result)
+        if action == "rework":
+            requeued = helper.requeue_dev_tasks(task, self._last_execution_result)
+            if requeued:
+                logger.info(
+                    f"[qa] test_report {task.id} execution failed — requeued DEV tasks: {requeued}"
+                )
+        elif action == "blocked":
+            logger.warning(
+                f"[qa] test_report {task.id} execution blocked "
+                f"({self._last_execution_result.get('summary', '')}) — "
+                "infrastructure/timeout issue, human or DEVOPS review needed"
             )
 
-        # If execution failed, inject feedback into DEV tasks for the same epic
-        if self._last_execution_result.get("status") == "failed":
-            self._inject_dev_feedback(task)
-
-    def _inject_dev_feedback(self, task: SdlcTask) -> None:
-        """Inject role_feedback into DEV tasks in the same epic so DEV sees what failed."""
-        result = self._last_execution_result
-        if not result:
-            return
-
-        failed_checks = [
-            c for c in result.get("checks", [])
-            if c["status"] == "failed"
-        ]
-        if not failed_checks:
-            return
-
-        summary_lines = [
-            f"[qa-execution] {result.get('summary', 'checks failed')}",
-            "Failed checks:",
-        ]
-        for c in failed_checks[:5]:
-            tail = (c.get("stderr_tail") or c.get("stdout_tail") or "")[-150:].strip()
-            summary_lines.append(
-                f"  - {c['name']}: {tail or c.get('skip_reason', 'no output')}"
-            )
-        feedback = "\n".join(summary_lines)
-
-        # Find DEV tasks in same epic and inject feedback
-        all_dev_tasks = self.storage.list_sdlc_tasks(task.project_id, role="dev")
-        for dev_task in all_dev_tasks:
-            if dev_task.epic_id != task.epic_id:
-                continue
-            try:
-                self.storage.update_sdlc_task_input_data(
-                    dev_task.id, {"role_feedback": feedback}
-                )
-            except Exception as exc:
-                import logging
-                logging.getLogger(__name__).warning(
-                    f"[qa] could not inject feedback into {dev_task.id}: {exc}"
-                )
-
-    def _resolve_project_path(self, task: SdlcTask, input_data: dict) -> str:
-        # 1. Explicit override in input_data
-        if "project_path" in input_data:
-            return input_data["project_path"]
-        # 2. DEV output directory for the same epic
-        output_base = os.getenv("OUTPUT_BASE_PATH", "/app/outputs")
-        dev_dir = os.path.join(
-            output_base, "projects", task.project_id, task.epic_id, "dev"
-        )
-        if os.path.isdir(dev_dir):
-            return dev_dir
-        # 3. Project-wide output directory (may not exist — test_runner handles that)
-        return os.path.join(output_base, "projects", task.project_id)
+    # ─── Helpers ──────────────────────────────────────────────────────────────
 
     def _get_code_summary(self, files: dict) -> str:
         code_content = []

@@ -223,6 +223,9 @@ def _run_node_checks(project_path: str, timeout: int) -> list:
 
     scripts = _read_package_scripts(project_path)
     checks = []
+    # Script *names* are allowlisted (test, build, lint) — no arbitrary names from LLM.
+    # The script *contents* are defined in the project's package.json (project-controlled)
+    # and are not validated here. Only run in trusted workspace environments.
     for script_name in ("test", "build", "lint"):
         if script_name not in scripts:
             checks.append(_check_result(

@@ -1,8 +1,10 @@
 """
-Tests for test_runner.py and QA agent SDLC hooks.
+Tests for test_runner.py, execution_helper.py, and storage.requeue_for_rework.
 
 Run: python3 sdlc/tests/test_test_runner.py
   or: python3 -m pytest sdlc/tests/test_test_runner.py -v
+
+No discord.py dependency — QA business logic is tested via QAExecutionHelper directly.
 """
 
 import json
@@ -27,6 +29,9 @@ from shared.test_runner import (
 )
 from shared.storage import Storage, SdlcTask
 
+# QAExecutionHelper is Discord-free — safe to import without discord.py installed
+from agents.qa.execution_helper import QAExecutionHelper, _DEV_REWORK_TASK_TYPES
+
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -36,20 +41,60 @@ def _write(path: str, content: str):
         f.write(content)
 
 
-def _make_task(storage, task_id, role="qa", task_type="test_report",
-               project_id="p1", epic_id="p1-E001", status="in_progress"):
+def _make_task(
+    storage: Storage,
+    task_id: str,
+    role: str = "qa",
+    task_type: str = "test_report",
+    project_id: str = "p1",
+    epic_id: str = "p1-E001",
+    status: str = "in_progress",
+    input_data: str = "{}",
+) -> SdlcTask:
     now = datetime.utcnow().isoformat()
     t = SdlcTask(
         id=task_id, project_id=project_id, epic_id=epic_id, task_number=1,
         role=role, task_type=task_type, title=f"T {task_id}", description="",
         output_file="out.md", output_format="markdown", depends_on="",
-        status=status, input_data="{}", output_data="{}",
+        status=status, input_data=input_data, output_data="{}",
         approval_msg_id="", revision_count=0, notes="",
         created_at=now, updated_at=now,
         claimed_at=now, claimed_by=role,
     )
     storage.create_sdlc_task(t)
     return t
+
+
+def _make_dev_task(
+    storage: Storage,
+    task_id: str,
+    task_type: str = "backend_code",
+    epic_id: str = "p1-E001",
+    status: str = "approved",
+) -> SdlcTask:
+    now = datetime.utcnow().isoformat()
+    t = SdlcTask(
+        id=task_id, project_id="p1", epic_id=epic_id, task_number=1,
+        role="dev", task_type=task_type, title=f"T {task_id}", description="",
+        output_file="code.py", output_format="code_multi", depends_on="",
+        status=status, input_data='{"project_name":"TestApp"}', output_data="{}",
+        approval_msg_id="", revision_count=0, notes="",
+        created_at=now, updated_at=now,
+    )
+    storage.create_sdlc_task(t)
+    return t
+
+
+class _DBFixture(unittest.TestCase):
+    """Mixin that provides a fresh SQLite DB per test."""
+
+    def setUp(self):
+        self._tmpfile = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self._tmpfile.close()
+        self.storage = Storage(db_path=self._tmpfile.name)
+
+    def tearDown(self):
+        os.unlink(self._tmpfile.name)
 
 
 # ─── _build_result helpers ────────────────────────────────────────────────────
@@ -138,11 +183,9 @@ class TestDetectProfile(unittest.TestCase):
     def test_docker_from_compose_yml(self):
         with tempfile.TemporaryDirectory() as d:
             _write(os.path.join(d, "docker-compose.yml"), "version: '3'")
-            # No .py files, no package.json
             self.assertEqual(_detect_profile(d), "docker")
 
     def test_node_wins_over_python_when_both_present(self):
-        """package.json takes priority over .py files."""
         with tempfile.TemporaryDirectory() as d:
             _write(os.path.join(d, "package.json"), '{"name":"x"}')
             _write(os.path.join(d, "app.py"), "print('hi')")
@@ -171,7 +214,6 @@ class TestRunQualityChecksSetup(unittest.TestCase):
 
     def test_undetectable_profile_skipped(self):
         with tempfile.TemporaryDirectory() as d:
-            # No .py, no package.json, no docker-compose
             r = run_quality_checks(d)
         self.assertEqual(r["status"], "skipped")
         self.assertIn("could not detect", r["checks"][0]["skip_reason"])
@@ -210,10 +252,8 @@ class TestPythonProfile(unittest.TestCase):
         self.assertIn("no .py files", compile_check["skip_reason"])
 
     def test_pytest_missing_gives_skipped(self):
-        """If pytest is not installed, the pytest check is skipped — not crashed."""
         with tempfile.TemporaryDirectory() as d:
             _write(os.path.join(d, "app.py"), "x = 1\n")
-            # Patch the probe call to simulate pytest not installed
             with patch("shared.test_runner.subprocess.run") as mock_run:
                 mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
                 r = run_quality_checks(d, profile="python", timeout_seconds=30)
@@ -239,7 +279,6 @@ class TestNodeProfile(unittest.TestCase):
             r = run_quality_checks(d, profile="node", timeout_seconds=30)
         for check in r["checks"]:
             if check["status"] != "skipped":
-                # npm not in PATH is also acceptable
                 self.assertIn("not found", check.get("skip_reason", ""))
 
     def test_missing_test_script_skipped(self):
@@ -247,7 +286,6 @@ class TestNodeProfile(unittest.TestCase):
             _write(os.path.join(d, "package.json"), '{"name":"x","scripts":{"build":"tsc"}}')
             r = run_quality_checks(d, profile="node", timeout_seconds=30)
         test_check = next((c for c in r["checks"] if c["name"] == "node:test"), None)
-        # Either skipped (script missing) or skipped (npm not found)
         self.assertIsNotNone(test_check)
         if test_check["status"] == "skipped":
             reason = test_check.get("skip_reason", "")
@@ -267,12 +305,10 @@ class TestNodeProfile(unittest.TestCase):
                     mock_run_cmd.side_effect = lambda name, cmd, cwd, timeout: \
                         _check_result(name, " ".join(cmd), "passed")
                     r = run_quality_checks(d, profile="node", timeout_seconds=30)
-            # _run_cmd must have been called for test and build (not lint)
             called_names = [call.args[0] for call in mock_run_cmd.call_args_list]
             self.assertIn("node:test", called_names)
             self.assertIn("node:build", called_names)
             self.assertNotIn("node:lint", called_names)
-            # lint check should appear as skipped in results
             lint_check = next(c for c in r["checks"] if c["name"] == "node:lint")
             self.assertEqual(lint_check["status"], "skipped")
             self.assertIn("not defined", lint_check["skip_reason"])
@@ -325,23 +361,18 @@ class TestCommandTimeout(unittest.TestCase):
 
 class TestNoArbitraryCommands(unittest.TestCase):
     def test_run_quality_checks_has_no_command_param(self):
-        """run_quality_checks must not accept a 'command' or 'commands' parameter."""
         import inspect
         sig = inspect.signature(run_quality_checks)
         self.assertNotIn("command", sig.parameters)
         self.assertNotIn("commands", sig.parameters)
 
     def test_profile_param_is_not_executed_as_command(self):
-        """Passing a shell string as profile must not execute it."""
         r = run_quality_checks("/tmp", profile="rm -rf /")
-        # Should just skip with 'unknown profile' error, not execute rm
         self.assertEqual(r["status"], "skipped")
         self.assertIn("unknown profile", r["checks"][0]["skip_reason"])
 
     def test_project_path_with_shell_injection_is_safe(self):
-        """Path containing shell metacharacters must be passed literally."""
         r = run_quality_checks("/tmp/$(echo evil)")
-        # Path won't exist → skipped, no command executed
         self.assertEqual(r["status"], "skipped")
 
 
@@ -369,158 +400,228 @@ class TestFormatExecutionResult(unittest.TestCase):
         self.assertIn("not installed", out)
 
 
-# ─── Integration: QA hooks ────────────────────────────────────────────────────
+# ─── Storage: requeue_for_rework ─────────────────────────────────────────────
 
-class TestQAIntegration(unittest.TestCase):
-    def setUp(self):
-        import tempfile as _tf
-        self._tmp = _tf.NamedTemporaryFile(suffix=".db", delete=False)
-        self._tmp.close()
-        self.storage = Storage(db_path=self._tmp.name)
+class TestRequeueForRework(_DBFixture):
+    def test_approved_task_requeued(self):
+        dev = _make_dev_task(self.storage, "DEV-001", status="approved")
+        result = self.storage.requeue_for_rework(dev.id, "QA failed")
+        self.assertTrue(result)
+        updated = self.storage.get_sdlc_task(dev.id)
+        self.assertEqual(updated.status, "pending")
+        self.assertEqual(updated.revision_count, 1)
+        self.assertEqual(updated.claimed_at, "")
+        self.assertEqual(updated.claimed_by, "")
 
-    def tearDown(self):
-        import os as _os
-        _os.unlink(self._tmp.name)
-
-    def _make_dev_task(self, task_id="DEV-001", epic_id="p1-E001"):
+    def test_completed_task_requeued(self):
         now = datetime.utcnow().isoformat()
         t = SdlcTask(
-            id=task_id, project_id="p1", epic_id=epic_id, task_number=1,
-            role="dev", task_type="unit_tests", title=f"T {task_id}", description="",
-            output_file="unit_tests.py", output_format="code_multi", depends_on="",
-            status="approved", input_data='{"project_name":"TestApp"}',
-            output_data="{}", approval_msg_id="", revision_count=0, notes="",
+            id="DEV-002", project_id="p1", epic_id="p1-E001", task_number=2,
+            role="dev", task_type="unit_tests", title="T", description="",
+            output_file="t.py", output_format="code_multi", depends_on="",
+            status="completed", input_data="{}", output_data="{}",
+            approval_msg_id="", revision_count=0, notes="",
             created_at=now, updated_at=now,
         )
         self.storage.create_sdlc_task(t)
-        return t
+        result = self.storage.requeue_for_rework(t.id, "QA rework")
+        self.assertTrue(result)
+        updated = self.storage.get_sdlc_task(t.id)
+        self.assertEqual(updated.status, "pending")
+        self.assertEqual(updated.revision_count, 1)
 
-    def test_dev_feedback_injected_when_execution_fails(self):
-        """When QA execution fails, role_feedback is injected into DEV tasks."""
-        from agents.qa.agent import QAAgent
-        agent = QAAgent()
-        agent.storage = self.storage
+    def test_pending_task_not_double_requeued(self):
+        """Tasks already pending must not be touched — prevents double-requeue."""
+        dev = _make_dev_task(self.storage, "DEV-001", status="approved")
+        self.storage.requeue_for_rework(dev.id, "first")
+        # Now it's pending — second call should not update
+        result = self.storage.requeue_for_rework(dev.id, "second")
+        self.assertFalse(result)
+        updated = self.storage.get_sdlc_task(dev.id)
+        # revision_count should still be 1 (not 2)
+        self.assertEqual(updated.revision_count, 1)
 
-        # Create a DEV task in the same epic
-        dev_task = self._make_dev_task()
+    def test_in_progress_task_not_requeued(self):
+        now = datetime.utcnow().isoformat()
+        t = SdlcTask(
+            id="DEV-003", project_id="p1", epic_id="p1-E001", task_number=3,
+            role="dev", task_type="backend_code", title="T", description="",
+            output_file="c.py", output_format="code_multi", depends_on="",
+            status="in_progress", input_data="{}", output_data="{}",
+            approval_msg_id="", revision_count=0, notes="",
+            created_at=now, updated_at=now,
+        )
+        self.storage.create_sdlc_task(t)
+        result = self.storage.requeue_for_rework(t.id, "QA rework")
+        self.assertFalse(result)
+        updated = self.storage.get_sdlc_task(t.id)
+        self.assertEqual(updated.status, "in_progress")
 
-        # Set up a failed execution result
-        failed_result = _build_result([
-            _check_result("python:pytest", "pytest", "failed", stderr_tail="AssertionError")
-        ])
-        agent._last_execution_result = failed_result
+    def test_nonexistent_task_returns_false(self):
+        result = self.storage.requeue_for_rework("NONEXISTENT", "note")
+        self.assertFalse(result)
 
-        # Create QA test_report task
-        qa_task = _make_task(self.storage, "QA-001", role="qa",
-                              task_type="test_report", project_id="p1", epic_id="p1-E001")
+    def test_notes_appended(self):
+        dev = _make_dev_task(self.storage, "DEV-001", status="approved")
+        self.storage.requeue_for_rework(dev.id, "QA failed: 1 failed")
+        updated = self.storage.get_sdlc_task(dev.id)
+        self.assertIn("QA failed", updated.notes)
 
-        # Call inject directly
-        agent._inject_dev_feedback(qa_task)
 
-        updated = self.storage.get_sdlc_task(dev_task.id)
+# ─── QAExecutionHelper — routing decisions ────────────────────────────────────
+
+class TestQAExecutionHelperRouting(_DBFixture):
+    def _helper(self):
+        return QAExecutionHelper(self.storage)
+
+    def test_decide_action_failed(self):
+        result = _build_result([_check_result("a", "x", "failed")])
+        self.assertEqual(self._helper().decide_action(result), "rework")
+
+    def test_decide_action_blocked(self):
+        result = _build_result([_check_result("a", "x", "failed", skip_reason="timed out after 30s")])
+        self.assertEqual(self._helper().decide_action(result), "blocked")
+
+    def test_decide_action_passed(self):
+        result = _build_result([_check_result("a", "x", "passed")])
+        self.assertEqual(self._helper().decide_action(result), "passed")
+
+    def test_decide_action_skipped(self):
+        result = _build_result([_check_result("a", "x", "skipped")])
+        self.assertEqual(self._helper().decide_action(result), "skipped")
+
+    def test_get_role_override_failed_returns_dev(self):
+        result = _build_result([_check_result("python:pytest", "pytest", "failed")])
+        override = self._helper().get_role_override({}, result)
+        self.assertEqual(override, "dev")
+
+    def test_get_role_override_blocked_returns_none(self):
+        """Blocked (infrastructure/timeout) must NOT auto-route to DEV."""
+        result = _build_result([_check_result("a", "x", "failed", skip_reason="timed out after 30s")])
+        override = self._helper().get_role_override({}, result)
+        self.assertIsNone(override)
+
+    def test_get_role_override_passed_returns_none(self):
+        result = _build_result([_check_result("a", "x", "passed")])
+        override = self._helper().get_role_override({"bugs_found": 0}, result)
+        self.assertIsNone(override)
+
+    def test_get_role_override_skipped_returns_none(self):
+        result = _build_result([_check_result("a", "x", "skipped")])
+        override = self._helper().get_role_override({}, result)
+        self.assertIsNone(override)
+
+    def test_get_role_override_critical_bugs_returns_dev(self):
+        """Legacy bug-severity routing still works when no execution result."""
+        output_data = {"bugs_found": 3, "severity_breakdown": {"critical": 2, "high": 1}}
+        override = self._helper().get_role_override(output_data, None)
+        self.assertEqual(override, "dev")
+
+    def test_get_role_override_no_execution_result_no_bugs(self):
+        override = self._helper().get_role_override({"bugs_found": 0}, None)
+        self.assertIsNone(override)
+
+
+# ─── QAExecutionHelper — DEV rework ──────────────────────────────────────────
+
+class TestQAExecutionHelperRework(_DBFixture):
+    def _helper(self):
+        return QAExecutionHelper(self.storage)
+
+    def _qa_task(self, epic_id="p1-E001"):
+        return _make_task(self.storage, "QA-001", role="qa",
+                          task_type="test_report", epic_id=epic_id)
+
+    def test_failed_execution_requeues_backend_code(self):
+        dev = _make_dev_task(self.storage, "DEV-001", task_type="backend_code", status="approved")
+        qa_task = self._qa_task()
+        result = _build_result([_check_result("python:pytest", "pytest", "failed")])
+        requeued = self._helper().requeue_dev_tasks(qa_task, result)
+        self.assertIn(dev.id, requeued)
+        updated = self.storage.get_sdlc_task(dev.id)
+        self.assertEqual(updated.status, "pending")
+        self.assertEqual(updated.revision_count, 1)
+
+    def test_failed_execution_requeues_unit_tests(self):
+        dev = _make_dev_task(self.storage, "DEV-002", task_type="unit_tests", status="approved")
+        qa_task = self._qa_task()
+        result = _build_result([_check_result("python:pytest", "pytest", "failed")])
+        requeued = self._helper().requeue_dev_tasks(qa_task, result)
+        self.assertIn(dev.id, requeued)
+
+    def test_failed_execution_requeues_frontend_code(self):
+        dev = _make_dev_task(self.storage, "DEV-003", task_type="frontend_code", status="approved")
+        qa_task = self._qa_task()
+        result = _build_result([_check_result("node:test", "npm run test", "failed")])
+        requeued = self._helper().requeue_dev_tasks(qa_task, result)
+        self.assertIn(dev.id, requeued)
+
+    def test_non_code_dev_tasks_not_requeued(self):
+        """dev_readme and backend_structure are not code tasks — must be left alone."""
+        readme = _make_dev_task(self.storage, "DEV-004", task_type="dev_readme", status="approved")
+        struct = _make_dev_task(self.storage, "DEV-005", task_type="backend_structure", status="approved")
+        qa_task = self._qa_task()
+        result = _build_result([_check_result("python:pytest", "pytest", "failed")])
+        requeued = self._helper().requeue_dev_tasks(qa_task, result)
+        self.assertNotIn(readme.id, requeued)
+        self.assertNotIn(struct.id, requeued)
+
+    def test_different_epic_tasks_not_requeued(self):
+        dev = _make_dev_task(self.storage, "DEV-001", task_type="backend_code",
+                              epic_id="p1-E002", status="approved")
+        qa_task = self._qa_task(epic_id="p1-E001")
+        result = _build_result([_check_result("python:pytest", "pytest", "failed")])
+        requeued = self._helper().requeue_dev_tasks(qa_task, result)
+        self.assertNotIn(dev.id, requeued)
+
+    def test_role_feedback_injected_into_requeued_task(self):
+        dev = _make_dev_task(self.storage, "DEV-001", task_type="backend_code", status="approved")
+        qa_task = self._qa_task()
+        result = _build_result([_check_result("python:pytest", "pytest", "failed",
+                                              stderr_tail="AssertionError")])
+        self._helper().requeue_dev_tasks(qa_task, result)
+        updated = self.storage.get_sdlc_task(dev.id)
         inp = json.loads(updated.input_data)
         self.assertIn("role_feedback", inp)
         self.assertIn("qa-execution", inp["role_feedback"])
 
-    def test_dev_feedback_not_injected_for_different_epic(self):
-        """DEV tasks from a different epic must not receive feedback."""
-        from agents.qa.agent import QAAgent
-        agent = QAAgent()
-        agent.storage = self.storage
-
-        dev_task = self._make_dev_task(epic_id="p1-E002")  # different epic
-
-        failed_result = _build_result([
-            _check_result("python:pytest", "pytest", "failed", stderr_tail="err")
+    def test_blocked_execution_does_not_requeue(self):
+        """Blocked (timeout/infra) must not requeue DEV — human review needed."""
+        dev = _make_dev_task(self.storage, "DEV-001", task_type="backend_code", status="approved")
+        qa_task = self._qa_task()
+        blocked_result = _build_result([
+            _check_result("python:pytest", "pytest", "failed", skip_reason="timed out after 30s")
         ])
-        agent._last_execution_result = failed_result
+        self.assertEqual(blocked_result["status"], "blocked")
+        action = self._helper().decide_action(blocked_result)
+        self.assertEqual(action, "blocked")
+        # decide_action returns "blocked", so caller (agent) does NOT call requeue_dev_tasks
+        # Verify helper.requeue_dev_tasks is NOT called for blocked — simulate agent logic
+        if action == "rework":
+            self._helper().requeue_dev_tasks(qa_task, blocked_result)
+        updated = self.storage.get_sdlc_task(dev.id)
+        self.assertEqual(updated.status, "approved")  # unchanged
 
-        qa_task = _make_task(self.storage, "QA-001", role="qa",
-                              task_type="test_report", project_id="p1", epic_id="p1-E001")
-        agent._inject_dev_feedback(qa_task)
+    def test_passed_execution_does_not_requeue(self):
+        dev = _make_dev_task(self.storage, "DEV-001", task_type="backend_code", status="approved")
+        qa_task = self._qa_task()
+        passed_result = _build_result([_check_result("python:py_compile", "python3 -m py_compile", "passed")])
+        action = self._helper().decide_action(passed_result)
+        if action == "rework":
+            self._helper().requeue_dev_tasks(qa_task, passed_result)
+        updated = self.storage.get_sdlc_task(dev.id)
+        self.assertEqual(updated.status, "approved")  # unchanged
 
-        updated = self.storage.get_sdlc_task(dev_task.id)
-        inp = json.loads(updated.input_data)
-        self.assertNotIn("role_feedback", inp)
 
-    def test_no_feedback_injected_when_execution_passes(self):
-        """Passing execution must not inject feedback into DEV tasks."""
-        from agents.qa.agent import QAAgent
-        agent = QAAgent()
-        agent.storage = self.storage
+# ─── QAExecutionHelper — artifact saving and path resolution ─────────────────
 
-        dev_task = self._make_dev_task()
-
-        passed_result = _build_result([
-            _check_result("python:py_compile", "python3 -m py_compile", "passed")
-        ])
-        agent._last_execution_result = passed_result
-
-        qa_task = _make_task(self.storage, "QA-001", role="qa",
-                              task_type="test_report", project_id="p1", epic_id="p1-E001")
-        agent._inject_dev_feedback(qa_task)
-
-        updated = self.storage.get_sdlc_task(dev_task.id)
-        inp = json.loads(updated.input_data)
-        self.assertNotIn("role_feedback", inp)
-
-    def test_get_next_role_override_returns_dev_on_execution_failure(self):
-        """_get_next_role_override must return 'dev' when execution result is failed."""
-        from agents.qa.agent import QAAgent
-        agent = QAAgent()
-        failed_result = _build_result([
-            _check_result("python:pytest", "pytest", "failed")
-        ])
-        agent._last_execution_result = failed_result
-        override = agent._get_next_role_override({})
-        self.assertEqual(override, "dev")
-
-    def test_get_next_role_override_none_when_execution_passes(self):
-        """No override when execution passes and no critical bugs."""
-        from agents.qa.agent import QAAgent
-        agent = QAAgent()
-        passed_result = _build_result([
-            _check_result("python:py_compile", "python3 -m py_compile", "passed")
-        ])
-        agent._last_execution_result = passed_result
-        override = agent._get_next_role_override({"bugs_found": 0})
-        self.assertIsNone(override)
-
-    def test_get_next_role_override_still_works_for_critical_bugs(self):
-        """Original bug-severity routing still works when no execution result."""
-        from agents.qa.agent import QAAgent
-        agent = QAAgent()
-        agent._last_execution_result = None
-        output_data = {
-            "bugs_found": 3,
-            "severity_breakdown": {"critical": 2, "high": 1},
-        }
-        override = agent._get_next_role_override(output_data)
-        self.assertEqual(override, "dev")
-
-    def test_resolve_project_path_uses_input_data_override(self):
-        """Explicit project_path in input_data takes priority."""
-        from agents.qa.agent import QAAgent
-        agent = QAAgent()
-        qa_task = _make_task(self.storage, "QA-001")
-        agent.storage = self.storage
-        path = agent._resolve_project_path(qa_task, {"project_path": "/custom/path"})
-        self.assertEqual(path, "/custom/path")
-
-    def test_post_save_hook_saves_json_artifact(self):
-        """_post_save_hook writes qa_execution_result.json when execution result is set."""
-        import asyncio
-        from agents.qa.agent import QAAgent
-        agent = QAAgent()
-        agent.storage = self.storage
-
+class TestQAExecutionHelperArtifacts(_DBFixture):
+    def test_save_execution_artifact_writes_json(self):
         qa_task = _make_task(self.storage, "QA-001", task_type="test_report")
-        agent._last_execution_result = _build_result([
-            _check_result("python:py_compile", "python3 -m py_compile", "passed")
-        ])
-
+        result = _build_result([_check_result("python:py_compile", "python3 -m py_compile", "passed")])
+        helper = QAExecutionHelper(self.storage)
         with tempfile.TemporaryDirectory() as out_dir:
-            asyncio.run(agent._post_save_hook(qa_task, out_dir))
+            helper.save_execution_artifact(qa_task, out_dir, result)
             json_path = os.path.join(out_dir, "qa_execution_result.json")
             self.assertTrue(os.path.exists(json_path))
             with open(json_path) as fh:
@@ -528,22 +629,19 @@ class TestQAIntegration(unittest.TestCase):
             self.assertIn("status", data)
             self.assertIn("checks", data)
 
-    def test_post_save_hook_noop_for_non_test_report_task(self):
-        """_post_save_hook does nothing for tasks other than test_report."""
-        import asyncio
-        from agents.qa.agent import QAAgent
-        agent = QAAgent()
-        agent.storage = self.storage
-        agent._last_execution_result = _build_result([
-            _check_result("python:py_compile", "python3 -m py_compile", "passed")
-        ])
-        qa_task = _make_task(self.storage, "QA-001", task_type="qa_plan")
+    def test_resolve_project_path_uses_input_data_override(self):
+        qa_task = _make_task(self.storage, "QA-001")
+        helper = QAExecutionHelper(self.storage)
+        path = helper.resolve_project_path(qa_task, {"project_path": "/custom/path"})
+        self.assertEqual(path, "/custom/path")
 
-        with tempfile.TemporaryDirectory() as out_dir:
-            asyncio.run(agent._post_save_hook(qa_task, out_dir))
-            self.assertFalse(
-                os.path.exists(os.path.join(out_dir, "qa_execution_result.json"))
-            )
+    def test_resolve_project_path_falls_back_to_project_dir(self):
+        qa_task = _make_task(self.storage, "QA-001",
+                              project_id="p1", epic_id="p1-E001")
+        helper = QAExecutionHelper(self.storage, output_base="/app/outputs")
+        path = helper.resolve_project_path(qa_task, {})
+        # DEV dir doesn't exist so it falls through to project dir
+        self.assertIn("p1", path)
 
 
 if __name__ == "__main__":

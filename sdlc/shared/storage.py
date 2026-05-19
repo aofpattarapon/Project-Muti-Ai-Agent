@@ -649,6 +649,32 @@ class Storage:
             )
             conn.commit()
 
+    def requeue_for_rework(self, task_id: str, notes_suffix: str = "") -> bool:
+        """Re-queue a task for QA-triggered rework.
+
+        Unlike manual_retry_sdlc_task (which preserves attempt_count and is
+        human-initiated), this increments revision_count and clears claim fields.
+        Only applies to tasks in terminal/approval states — never touches tasks
+        that are already pending or in_progress to avoid double-requeueing.
+        Returns True if the task was actually updated.
+        """
+        now = datetime.utcnow().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """UPDATE sdlc_tasks
+                   SET status='pending',
+                       revision_count=revision_count+1,
+                       claimed_at='', claimed_by='', approval_msg_id='',
+                       notes=CASE WHEN notes='' OR notes IS NULL
+                                  THEN ? ELSE notes||'; '||? END,
+                       updated_at=?
+                   WHERE id=?
+                     AND status IN ('approved','completed','waiting_approval','failed')""",
+                (notes_suffix, notes_suffix, now, task_id),
+            )
+            conn.commit()
+        return cursor.rowcount == 1
+
     def request_sdlc_task_revision(self, task_id: str, note: str):
         """Re-queue an sdlc_task for revision: status=pending, increment revision, inject note."""
         import logging as _logging
