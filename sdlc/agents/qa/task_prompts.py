@@ -290,6 +290,9 @@ PROMPTS = {
 - **Epic ID:** {epic_id}
 - **ชื่อ:** {epic_title}
 
+## ผลการรัน Automated Quality Checks (จาก QA Execution Engine):
+{qa_execution_formatted}
+
 ## Test Scenarios:
 {test_scenarios_content}
 
@@ -382,6 +385,7 @@ def build_qa_task_prompt(task_type: str, context: dict) -> str:
     ctx = {
         "today": date.today().strftime("%Y-%m-%d"),
         "ba_user_stories": "ดูรายละเอียดใน BRD / SRS ของ Epic นี้",
+        "qa_execution_formatted": "ไม่มีข้อมูล execution (skipped — ไม่มี project_path)",
         **context,
     }
     return lang + safe_format(template, ctx)

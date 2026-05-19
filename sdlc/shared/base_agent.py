@@ -113,6 +113,17 @@ class BaseAgent(ABC):
         """Override next role routing (e.g. QA→DEV bug loop). Return role str or None."""
         return None
 
+    async def _pre_llm_hook(self, task: "SdlcTask", input_data: dict) -> dict:
+        """Called in _execute_sdlc_task before the LLM prompt is built.
+        Override in subclass to inject extra context keys (e.g. test execution results).
+        Returned dict is merged into the context passed to _build_sdlc_prompt."""
+        return {}
+
+    async def _post_save_hook(self, task: "SdlcTask", output_dir: str) -> None:
+        """Called in _execute_sdlc_task after the main artifact is saved.
+        Override in subclass to write additional artifacts or inject feedback."""
+        pass
+
     # ─── helper ให้ subclass เรียก LLM ────────────────────────────
 
     def _effective_system_prompt(self, is_free_model: bool = False) -> str:
@@ -1398,6 +1409,16 @@ class BaseAgent(ABC):
 
         context = self._build_sdlc_context(task, project_name, input_data)
 
+        # ─── Role-specific pre-LLM hook ──────────────────────────────
+        # Subclasses (e.g. QA) override this to inject extra context
+        # (test execution results, etc.) before the prompt is built.
+        try:
+            _extra_ctx = await self._pre_llm_hook(task, input_data)
+            if _extra_ctx:
+                context.update(_extra_ctx)
+        except Exception as _hook_err:
+            logger.warning(f"[{self.role_name}] pre-llm hook error: {_hook_err}")
+
         # ─── Build prompt via role-specific builder ──────────────────
         prompt = self._build_sdlc_prompt(task.task_type, context)
 
@@ -1505,6 +1526,14 @@ class BaseAgent(ABC):
             output_format=task.output_format,
             output_dir=output_dir,
         )
+
+        # ─── Role-specific post-save hook ────────────────────────────
+        # Subclasses (e.g. QA) override this to save extra artifacts
+        # or inject feedback into other tasks after the main file is saved.
+        try:
+            await self._post_save_hook(task, output_dir)
+        except Exception as _ph_err:
+            logger.warning(f"[{self.role_name}] post-save hook error: {_ph_err}")
 
         # ─── TimeLog finish ──────────────────────────────────────────
         finished = self.timelog.finish(
