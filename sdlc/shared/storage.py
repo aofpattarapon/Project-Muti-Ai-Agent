@@ -50,7 +50,7 @@ class SdlcTask:
     output_file: str     # "BRD.md", "raci_matrix.xlsx" …
     output_format: str   # markdown / excel / mermaid / html / sql / yaml / dockerfile
     depends_on: str      # comma-separated SdlcTask IDs (empty = no deps)
-    status: str          # pending / in_progress / waiting_approval / approved / failed
+    status: str          # pending / in_progress / waiting_approval / approved / failed / paused
     input_data: str      # JSON
     output_data: str     # JSON {"content": "…"}
     approval_msg_id: str
@@ -63,6 +63,13 @@ class SdlcTask:
     last_error: str = ""     # last failure message
     claimed_at: str = ""     # ISO timestamp when task was claimed for execution
     claimed_by: str = ""     # role name that claimed this task
+    # Quota/provider pause fields (added via migration)
+    pause_reason: str = ""   # quota_exceeded | rate_limited | context_limit_exceeded | …
+    pause_provider: str = "" # "anthropic" | "openai" | "groq" | "ollama"
+    pause_model: str = ""    # model_key that triggered the pause
+    retry_after_at: str = "" # ISO timestamp — earliest time recovery worker may requeue
+    paused_at: str = ""      # ISO timestamp when task entered paused state
+    resume_policy: str = ""  # "auto" | "manual_token_fix"
 
 
 class RoleType(str, Enum):
@@ -204,13 +211,32 @@ class Storage:
             # Migration: add execution-tracking columns if they don't exist yet
             _sdlc_cols = {r[1] for r in conn.execute("PRAGMA table_info(sdlc_tasks)").fetchall()}
             for _col, _defn in [
-                ("attempt_count", "INTEGER DEFAULT 0"),
-                ("last_error",    "TEXT DEFAULT ''"),
-                ("claimed_at",    "TEXT DEFAULT ''"),
-                ("claimed_by",    "TEXT DEFAULT ''"),
+                ("attempt_count",  "INTEGER DEFAULT 0"),
+                ("last_error",     "TEXT DEFAULT ''"),
+                ("claimed_at",     "TEXT DEFAULT ''"),
+                ("claimed_by",     "TEXT DEFAULT ''"),
+                # Phase 8 pause fields
+                ("pause_reason",   "TEXT DEFAULT ''"),
+                ("pause_provider", "TEXT DEFAULT ''"),
+                ("pause_model",    "TEXT DEFAULT ''"),
+                ("retry_after_at", "TEXT DEFAULT ''"),
+                ("paused_at",      "TEXT DEFAULT ''"),
+                ("resume_policy",  "TEXT DEFAULT ''"),
             ]:
                 if _col not in _sdlc_cols:
                     conn.execute(f"ALTER TABLE sdlc_tasks ADD COLUMN {_col} {_defn}")
+
+            # Phase 8: provider cooldown tracking
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS provider_cooldowns (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL DEFAULT '',
+                    reason TEXT DEFAULT '',
+                    retry_after_at TEXT NOT NULL,
+                    created_at TEXT
+                )
+            """)
             conn.commit()
 
     # ─── Project CRUD ───────────────────────────────────────────────────────────
@@ -716,17 +742,28 @@ class Storage:
         return [self._row_to_sdlc_task(r) for r in rows]
 
     def _row_to_sdlc_task(self, row) -> SdlcTask:
+        def _s(i: int) -> str:
+            return row[i] if len(row) > i and row[i] is not None else ""
+        def _i(i: int) -> int:
+            return row[i] if len(row) > i and row[i] is not None else 0
         return SdlcTask(
             id=row[0], project_id=row[1], epic_id=row[2], task_number=row[3],
             role=row[4], task_type=row[5], title=row[6], description=row[7],
             output_file=row[8], output_format=row[9], depends_on=row[10],
             status=row[11], input_data=row[12], output_data=row[13],
-            approval_msg_id=row[14], revision_count=row[15], notes=row[16],
-            created_at=row[17], updated_at=row[18],
-            attempt_count=row[19] if len(row) > 19 and row[19] is not None else 0,
-            last_error=row[20]   if len(row) > 20 and row[20] is not None else "",
-            claimed_at=row[21]   if len(row) > 21 and row[21] is not None else "",
-            claimed_by=row[22]   if len(row) > 22 and row[22] is not None else "",
+            approval_msg_id=row[14], revision_count=_i(15), notes=_s(16),
+            created_at=_s(17), updated_at=_s(18),
+            attempt_count=_i(19),
+            last_error=_s(20),
+            claimed_at=_s(21),
+            claimed_by=_s(22),
+            # Phase 8 pause fields
+            pause_reason=_s(23),
+            pause_provider=_s(24),
+            pause_model=_s(25),
+            retry_after_at=_s(26),
+            paused_at=_s(27),
+            resume_policy=_s(28),
         )
 
     def get_sdlc_task_by_title(self, task_name: str, role: str) -> Optional[SdlcTask]:
@@ -761,6 +798,146 @@ class Storage:
             )
             conn.commit()
             return cursor.rowcount > 0
+
+    # ─── Phase 8: Quota/Provider Pause ─────────────────────────────────────────
+
+    def pause_sdlc_task_for_provider(
+        self,
+        task_id: str,
+        reason: str,
+        provider: str,
+        model: str,
+        retry_after_at: str,
+        error: str = "",
+        resume_policy: str = "auto",
+    ):
+        """
+        Move task to status='paused' and record all pause metadata.
+
+        Clears claimed_at/claimed_by so the recovery worker can safely requeue it
+        without racing against an active agent claim.
+        """
+        now = datetime.utcnow().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """UPDATE sdlc_tasks
+                   SET status='paused',
+                       pause_reason=?, pause_provider=?, pause_model=?,
+                       retry_after_at=?, paused_at=?, resume_policy=?,
+                       last_error=?,
+                       claimed_at='', claimed_by='',
+                       updated_at=?
+                   WHERE id=?""",
+                (reason, provider, model, retry_after_at, now,
+                 resume_policy, error[:500], now, task_id),
+            )
+            conn.commit()
+
+    def list_paused_sdlc_tasks(self, now_iso: str = "") -> list:
+        """
+        Return paused tasks whose retry_after_at <= now_iso (ready to resume).
+        If now_iso is empty, return ALL paused tasks regardless of retry_after_at.
+        Never returns tasks with resume_policy='manual_token_fix'.
+        """
+        now_iso = now_iso or datetime.utcnow().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM sdlc_tasks "
+                "WHERE status='paused' "
+                "  AND (resume_policy IS NULL OR resume_policy != 'manual_token_fix') "
+                "  AND (retry_after_at = '' OR retry_after_at <= ?) "
+                "ORDER BY retry_after_at",
+                (now_iso,),
+            ).fetchall()
+        return [self._row_to_sdlc_task(r) for r in rows]
+
+    def resume_paused_sdlc_task(self, task_id: str):
+        """
+        Clear pause fields and requeue task to pending.
+        Only acts on tasks currently in status='paused'.
+        """
+        now = datetime.utcnow().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """UPDATE sdlc_tasks
+                   SET status='pending',
+                       pause_reason='', pause_provider='', pause_model='',
+                       retry_after_at='', paused_at='', resume_policy='',
+                       claimed_at='', claimed_by='',
+                       updated_at=?
+                   WHERE id=? AND status='paused'""",
+                (now, task_id),
+            )
+            conn.commit()
+
+    # ── Provider cooldown ────────────────────────────────────────────────────
+
+    def set_provider_cooldown(
+        self,
+        provider: str,
+        model: str,
+        reason: str,
+        retry_after_at: str,
+    ):
+        """
+        Upsert a cooldown record for a provider+model combination.
+        Replaces any existing cooldown for the same (provider, model) pair
+        if the new retry_after_at is later (more restrictive).
+        """
+        now = datetime.utcnow().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            existing = conn.execute(
+                "SELECT id, retry_after_at FROM provider_cooldowns "
+                "WHERE provider=? AND model=?",
+                (provider, model),
+            ).fetchone()
+            if existing:
+                # Only update if new deadline is later
+                if retry_after_at >= existing[1]:
+                    conn.execute(
+                        "UPDATE provider_cooldowns "
+                        "SET reason=?, retry_after_at=?, created_at=? "
+                        "WHERE id=?",
+                        (reason, retry_after_at, now, existing[0]),
+                    )
+            else:
+                conn.execute(
+                    "INSERT INTO provider_cooldowns (provider, model, reason, retry_after_at, created_at) "
+                    "VALUES (?,?,?,?,?)",
+                    (provider, model, reason, retry_after_at, now),
+                )
+            conn.commit()
+
+    def get_active_provider_cooldowns(self, now_iso: str = "") -> list:
+        """
+        Return list of dicts for cooldowns still active (retry_after_at > now).
+        Each dict has: provider, model, reason, retry_after_at.
+        """
+        now_iso = now_iso or datetime.utcnow().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT provider, model, reason, retry_after_at FROM provider_cooldowns "
+                "WHERE retry_after_at > ? ORDER BY retry_after_at",
+                (now_iso,),
+            ).fetchall()
+        return [
+            {"provider": r[0], "model": r[1], "reason": r[2], "retry_after_at": r[3]}
+            for r in rows
+        ]
+
+    def clear_provider_cooldown(self, provider: str, model: str = ""):
+        """Remove the cooldown record for the given provider (and optionally model)."""
+        with sqlite3.connect(self.db_path) as conn:
+            if model:
+                conn.execute(
+                    "DELETE FROM provider_cooldowns WHERE provider=? AND model=?",
+                    (provider, model),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM provider_cooldowns WHERE provider=?", (provider,)
+                )
+            conn.commit()
 
     def get_next_role(self, current_role: str) -> Optional[str]:
         """ส่งคืน Role ถัดไปใน SDLC Workflow (ใช้ channel_config)"""
