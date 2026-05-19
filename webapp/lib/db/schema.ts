@@ -121,6 +121,25 @@ export function createCoreSchema(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_approval_items_updated_at
     ON approval_items(updated_at);
+
+    CREATE TABLE IF NOT EXISTS task_artifacts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sdlc_task_id TEXT NOT NULL,
+      project_id TEXT NOT NULL DEFAULT '',
+      role_key TEXT NOT NULL DEFAULT '',
+      artifact_type TEXT NOT NULL,
+      artifact_path TEXT NOT NULL DEFAULT '',
+      artifact_ref TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(sdlc_task_id, artifact_type)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_task_artifacts_sdlc_task_id
+    ON task_artifacts(sdlc_task_id);
+
+    CREATE INDEX IF NOT EXISTS idx_task_artifacts_project_id
+    ON task_artifacts(project_id);
   `);
 }
 
@@ -320,6 +339,28 @@ export function ensureAgentRoleConfigExpansionColumns(db: Database.Database) {
       continue;
     }
 
+    try {
+      db.exec(addition.sql);
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !error.message.toLowerCase().includes("duplicate column name")
+      ) {
+        throw error;
+      }
+    }
+  }
+}
+
+export function ensureAgentActivityLogColumns(db: Database.Database) {
+  const columns = db.prepare("PRAGMA table_info(agent_activity_logs)").all() as { name: string }[];
+  const additions = [
+    { name: "sdlc_task_id", sql: "ALTER TABLE agent_activity_logs ADD COLUMN sdlc_task_id TEXT NOT NULL DEFAULT ''" },
+    { name: "project_id",   sql: "ALTER TABLE agent_activity_logs ADD COLUMN project_id TEXT NOT NULL DEFAULT ''" },
+    { name: "metadata",     sql: "ALTER TABLE agent_activity_logs ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'" },
+  ];
+  for (const addition of additions) {
+    if (columns.some((c) => c.name === addition.name)) continue;
     try {
       db.exec(addition.sql);
     } catch (error) {

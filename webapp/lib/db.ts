@@ -6,6 +6,7 @@ import Database from "better-sqlite3";
 import { seedInitialBackofficeData, seedInitialUsers } from "@/lib/db/seed";
 import {
   createCoreSchema,
+  ensureAgentActivityLogColumns,
   ensureAgentRoleConfigExpansionColumns,
   ensureApprovalItemIdentityColumns,
   ensureUserMfaColumns,
@@ -36,6 +37,7 @@ function initializeDatabase(db: Database.Database) {
   ensureUserMfaColumns(db);
   ensureAgentRoleConfigExpansionColumns(db);
   ensureApprovalItemIdentityColumns(db);
+  ensureAgentActivityLogColumns(db);
   seedInitialUsers(db);
   seedInitialBackofficeData(db);
 }

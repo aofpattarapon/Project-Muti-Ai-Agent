@@ -31,6 +31,21 @@ export type AgentActivityLogRecord = {
   artifactRef: string | null;
   channelTarget: string | null;
   createdAt: string;
+  sdlcTaskId: string;
+  projectId: string;
+  metadata: string;
+};
+
+export type TaskArtifactRecord = {
+  id: number;
+  sdlcTaskId: string;
+  projectId: string;
+  roleKey: string;
+  artifactType: string;
+  artifactPath: string;
+  artifactRef: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type SystemConfigRecord = {
@@ -151,6 +166,9 @@ function mapAgentActivityLog(
         artifact_ref: string | null;
         channel_target: string | null;
         created_at: string;
+        sdlc_task_id?: string;
+        project_id?: string;
+        metadata?: string;
       }
     | undefined,
 ): AgentActivityLogRecord | null {
@@ -168,6 +186,9 @@ function mapAgentActivityLog(
     artifactRef: row.artifact_ref,
     channelTarget: row.channel_target,
     createdAt: row.created_at,
+    sdlcTaskId: row.sdlc_task_id ?? "",
+    projectId: row.project_id ?? "",
+    metadata: row.metadata ?? "{}",
   };
 }
 
@@ -534,6 +555,9 @@ export function createAgentActivityLog(input: {
   summary: string;
   artifactRef?: string;
   channelTarget?: string;
+  sdlcTaskId?: string;
+  projectId?: string;
+  metadata?: string;
 }) {
   const createdAt = new Date().toISOString();
 
@@ -541,9 +565,10 @@ export function createAgentActivityLog(input: {
     .prepare(
       `
         INSERT INTO agent_activity_logs (
-          role_key, event_type, task_name, status, summary, artifact_ref, channel_target, created_at
+          role_key, event_type, task_name, status, summary, artifact_ref, channel_target, created_at,
+          sdlc_task_id, project_id, metadata
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
     )
     .run(
@@ -555,6 +580,9 @@ export function createAgentActivityLog(input: {
       input.artifactRef ?? null,
       input.channelTarget ?? null,
       createdAt,
+      input.sdlcTaskId ?? "",
+      input.projectId ?? "",
+      input.metadata ?? "{}",
     );
 
   return result.changes > 0;
@@ -1134,4 +1162,251 @@ export function upsertProjectHotCache(input: {
     );
 
   return result.changes > 0;
+}
+
+// ─── Task Artifacts ───────────────────────────────────────────────────────────
+
+function mapTaskArtifact(row: {
+  id: number;
+  sdlc_task_id: string;
+  project_id: string;
+  role_key: string;
+  artifact_type: string;
+  artifact_path: string;
+  artifact_ref: string;
+  created_at: string;
+  updated_at: string;
+}): TaskArtifactRecord {
+  return {
+    id: row.id,
+    sdlcTaskId: row.sdlc_task_id,
+    projectId: row.project_id,
+    roleKey: row.role_key,
+    artifactType: row.artifact_type,
+    artifactPath: row.artifact_path,
+    artifactRef: row.artifact_ref,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function upsertTaskArtifact(input: {
+  sdlcTaskId: string;
+  projectId?: string;
+  roleKey?: string;
+  artifactType: string;
+  artifactPath?: string;
+  artifactRef?: string;
+}): boolean {
+  const now = new Date().toISOString();
+  const result = db
+    .prepare(
+      `INSERT INTO task_artifacts
+         (sdlc_task_id, project_id, role_key, artifact_type, artifact_path, artifact_ref, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(sdlc_task_id, artifact_type) DO UPDATE SET
+         artifact_path = excluded.artifact_path,
+         artifact_ref  = excluded.artifact_ref,
+         role_key      = excluded.role_key,
+         project_id    = excluded.project_id,
+         updated_at    = excluded.updated_at`,
+    )
+    .run(
+      input.sdlcTaskId,
+      input.projectId ?? "",
+      input.roleKey ?? "",
+      input.artifactType,
+      input.artifactPath ?? "",
+      input.artifactRef ?? "",
+      now,
+      now,
+    );
+  return result.changes > 0;
+}
+
+export function listTaskArtifacts(sdlcTaskId: string): TaskArtifactRecord[] {
+  const rows = db
+    .prepare(
+      `SELECT id, sdlc_task_id, project_id, role_key, artifact_type, artifact_path, artifact_ref,
+              created_at, updated_at
+       FROM task_artifacts
+       WHERE sdlc_task_id = ?
+       ORDER BY artifact_type ASC`,
+    )
+    .all(sdlcTaskId) as Array<{
+    id: number;
+    sdlc_task_id: string;
+    project_id: string;
+    role_key: string;
+    artifact_type: string;
+    artifact_path: string;
+    artifact_ref: string;
+    created_at: string;
+    updated_at: string;
+  }>;
+  return rows.map(mapTaskArtifact);
+}
+
+export function listProjectArtifacts(projectId: string): TaskArtifactRecord[] {
+  const rows = db
+    .prepare(
+      `SELECT id, sdlc_task_id, project_id, role_key, artifact_type, artifact_path, artifact_ref,
+              created_at, updated_at
+       FROM task_artifacts
+       WHERE project_id = ?
+       ORDER BY sdlc_task_id ASC, artifact_type ASC`,
+    )
+    .all(projectId) as Array<{
+    id: number;
+    sdlc_task_id: string;
+    project_id: string;
+    role_key: string;
+    artifact_type: string;
+    artifact_path: string;
+    artifact_ref: string;
+    created_at: string;
+    updated_at: string;
+  }>;
+  return rows.map(mapTaskArtifact);
+}
+
+// ─── Task Model Observability ─────────────────────────────────────────────────
+
+export function findLatestTaskLog(sdlcTaskId: string): AgentActivityLogRecord | null {
+  const row = db
+    .prepare(
+      `SELECT id, role_key, event_type, task_name, status, summary, artifact_ref, channel_target,
+              created_at, sdlc_task_id, project_id, metadata
+       FROM agent_activity_logs
+       WHERE sdlc_task_id = ?
+       ORDER BY id DESC LIMIT 1`,
+    )
+    .get(sdlcTaskId) as
+    | {
+        id: number;
+        role_key: string;
+        event_type: string;
+        task_name: string;
+        status: string;
+        summary: string;
+        artifact_ref: string | null;
+        channel_target: string | null;
+        created_at: string;
+        sdlc_task_id: string;
+        project_id: string;
+        metadata: string;
+      }
+    | undefined;
+  return mapAgentActivityLog(row);
+}
+
+export function listTaskStates(opts: {
+  projectId?: string;
+  roleKey?: string;
+  limit?: number;
+}): Array<{
+  sdlcTaskId: string;
+  projectId: string;
+  roleKey: string;
+  taskName: string;
+  lastStatus: string;
+  lastEventType: string;
+  lastLogId: number;
+  updatedAt: string;
+}> {
+  const limit = opts.limit ?? 100;
+  let query: string;
+  let params: unknown[];
+
+  if (opts.projectId && opts.roleKey) {
+    query = `
+      SELECT sdlc_task_id, project_id, role_key, task_name,
+             status as last_status, event_type as last_event_type,
+             id as last_log_id, created_at as updated_at
+      FROM agent_activity_logs
+      WHERE sdlc_task_id != ''
+        AND project_id = ?
+        AND role_key = ?
+        AND id IN (
+          SELECT MAX(id) FROM agent_activity_logs
+          WHERE sdlc_task_id != '' AND project_id = ? AND role_key = ?
+          GROUP BY sdlc_task_id
+        )
+      ORDER BY id DESC LIMIT ?`;
+    params = [opts.projectId, opts.roleKey, opts.projectId, opts.roleKey, limit];
+  } else if (opts.projectId) {
+    query = `
+      SELECT sdlc_task_id, project_id, role_key, task_name,
+             status as last_status, event_type as last_event_type,
+             id as last_log_id, created_at as updated_at
+      FROM agent_activity_logs
+      WHERE sdlc_task_id != '' AND project_id = ?
+        AND id IN (
+          SELECT MAX(id) FROM agent_activity_logs
+          WHERE sdlc_task_id != '' AND project_id = ?
+          GROUP BY sdlc_task_id
+        )
+      ORDER BY id DESC LIMIT ?`;
+    params = [opts.projectId, opts.projectId, limit];
+  } else {
+    query = `
+      SELECT sdlc_task_id, project_id, role_key, task_name,
+             status as last_status, event_type as last_event_type,
+             id as last_log_id, created_at as updated_at
+      FROM agent_activity_logs
+      WHERE sdlc_task_id != ''
+        AND id IN (
+          SELECT MAX(id) FROM agent_activity_logs
+          WHERE sdlc_task_id != ''
+          GROUP BY sdlc_task_id
+        )
+      ORDER BY id DESC LIMIT ?`;
+    params = [limit];
+  }
+
+  const rows = db.prepare(query).all(...params) as Array<{
+    sdlc_task_id: string;
+    project_id: string;
+    role_key: string;
+    task_name: string;
+    last_status: string;
+    last_event_type: string;
+    last_log_id: number;
+    updated_at: string;
+  }>;
+
+  return rows.map((r) => ({
+    sdlcTaskId: r.sdlc_task_id,
+    projectId: r.project_id,
+    roleKey: r.role_key,
+    taskName: r.task_name,
+    lastStatus: r.last_status,
+    lastEventType: r.last_event_type,
+    lastLogId: r.last_log_id,
+    updatedAt: r.updated_at,
+  }));
+}
+
+export function listBlockedEvents(opts: { roleKey?: string; limit?: number }): AgentActivityLogRecord[] {
+  const limit = opts.limit ?? 50;
+  const rows = opts.roleKey
+    ? (db
+        .prepare(
+          `SELECT id, role_key, event_type, task_name, status, summary, artifact_ref, channel_target,
+                  created_at, sdlc_task_id, project_id, metadata
+           FROM agent_activity_logs
+           WHERE event_type = 'devops_blocked' AND role_key = ?
+           ORDER BY id DESC LIMIT ?`,
+        )
+        .all(opts.roleKey, limit) as any[])
+    : (db
+        .prepare(
+          `SELECT id, role_key, event_type, task_name, status, summary, artifact_ref, channel_target,
+                  created_at, sdlc_task_id, project_id, metadata
+           FROM agent_activity_logs
+           WHERE event_type = 'devops_blocked'
+           ORDER BY id DESC LIMIT ?`,
+        )
+        .all(limit) as any[]);
+  return rows.map((r) => mapAgentActivityLog(r)).filter((r): r is AgentActivityLogRecord => r !== null);
 }

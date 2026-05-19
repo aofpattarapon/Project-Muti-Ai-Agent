@@ -645,5 +645,143 @@ class TestWebBridgeDevopsBlocked(unittest.TestCase):
         self.assertEqual(payload["metadata"]["blockers"], blockers)
 
 
+# ─── Phase 6: Model observability fields in task_completed ────────────────────
+
+class TestWebBridgeModelObservability(unittest.TestCase):
+    """Verify task_completed passes preferred_model, routed_model, fallback_used."""
+
+    def setUp(self):
+        from shared.web_bridge import WebAppBridge
+        self.bridge = WebAppBridge.__new__(WebAppBridge)
+        self.bridge.enabled = True
+        self.bridge.base_url = "http://localhost:3000"
+        self.bridge._web_url = "http://localhost:3000"
+        self.bridge.token = "test-token"
+        self.bridge._client = None
+        self.posted_payloads = []
+
+        async def fake_post(payload):
+            self.posted_payloads.append(payload)
+
+        self.bridge._post = fake_post
+
+    def _run(self, coro):
+        return asyncio.get_event_loop().run_until_complete(coro)
+
+    def test_preferred_model_in_metadata(self):
+        self._run(self.bridge.task_completed(
+            role_key="devops", project_id="p1", project_name="App",
+            task_name="Task", summary="done", files=[], model_id="claude-sonnet",
+            cost_usd=0.001, duration_seconds=5.0,
+            preferred_model="ollama/qwen2.5-coder",
+            routed_model="claude-sonnet",
+            fallback_used=True,
+        ))
+        meta = self.posted_payloads[0]["metadata"]
+        self.assertEqual(meta["preferred_model"], "ollama/qwen2.5-coder")
+        self.assertEqual(meta["routed_model"], "claude-sonnet")
+        self.assertTrue(meta["fallback_used"])
+
+    def test_artifacts_in_payload(self):
+        arts = [
+            {"type": "output_file", "path": "Dockerfile", "ref": "/out/Dockerfile"},
+            {"type": "release_notes", "path": "release_notes.md", "ref": "/out/rn.md"},
+        ]
+        self._run(self.bridge.task_completed(
+            role_key="devops", project_id="p1", project_name="App",
+            task_name="Task", summary="done", files=[], model_id="claude-sonnet",
+            cost_usd=0.001, duration_seconds=5.0,
+            artifacts=arts,
+        ))
+        payload = self.posted_payloads[0]
+        self.assertEqual(len(payload["artifacts"]), 2)
+        self.assertEqual(payload["artifacts"][0]["type"], "output_file")
+
+    def test_default_model_fields_empty(self):
+        self._run(self.bridge.task_completed(
+            role_key="dev", project_id="p1", project_name="App",
+            task_name="Task", summary="done", files=[], model_id="claude",
+            cost_usd=0.0, duration_seconds=1.0,
+        ))
+        meta = self.posted_payloads[0]["metadata"]
+        self.assertEqual(meta["preferred_model"], "")
+        self.assertEqual(meta["routed_model"], "")
+        self.assertFalse(meta["fallback_used"])
+
+    def test_no_fallback_when_models_match(self):
+        self._run(self.bridge.task_completed(
+            role_key="dev", project_id="p1", project_name="App",
+            task_name="Task", summary="done", files=[], model_id="ollama/qwen2.5-coder",
+            cost_usd=0.0, duration_seconds=1.0,
+            preferred_model="ollama/qwen2.5-coder",
+            routed_model="ollama/qwen2.5-coder",
+            fallback_used=False,
+        ))
+        meta = self.posted_payloads[0]["metadata"]
+        self.assertFalse(meta["fallback_used"])
+
+
+# ─── Phase 6: _collect_artifacts helper ──────────────────────────────────────
+
+class TestCollectArtifacts(unittest.TestCase):
+
+    def setUp(self):
+        from shared.storage import SdlcTask
+        now = datetime.utcnow().isoformat()
+        self.task = SdlcTask(
+            id="t1", project_id="p1", epic_id="p1-E001", task_number=1,
+            role="devops", task_type="dockerfile", title="Dockerfile",
+            description="", output_file="Dockerfile", output_format="dockerfile",
+            depends_on="", status="in_progress", input_data="{}", output_data="{}",
+            approval_msg_id="", revision_count=0, notes="",
+            created_at=now, updated_at=now,
+            attempt_count=0, claimed_by="", claimed_at="", last_error="",
+        )
+
+    def test_main_output_always_included(self):
+        from shared.artifact_collector import collect_artifacts as _collect_artifacts
+        with tempfile.TemporaryDirectory() as d:
+            saved = os.path.join(d, "Dockerfile")
+            with open(saved, "w") as f:
+                f.write("FROM python:3.11\n")
+            arts = _collect_artifacts(d, saved, self.task)
+        types = [a["type"] for a in arts]
+        self.assertIn("output_file", types)
+
+    def test_secondary_artifacts_detected(self):
+        from shared.artifact_collector import collect_artifacts as _collect_artifacts
+        with tempfile.TemporaryDirectory() as d:
+            saved = os.path.join(d, "Dockerfile")
+            with open(saved, "w") as f:
+                f.write("FROM python\n")
+            with open(os.path.join(d, "deployment_readiness_report.md"), "w") as f:
+                f.write("# Report\n")
+            with open(os.path.join(d, "release_notes.md"), "w") as f:
+                f.write("# Notes\n")
+            arts = _collect_artifacts(d, saved, self.task)
+        types = [a["type"] for a in arts]
+        self.assertIn("deployment_report", types)
+        self.assertIn("release_notes", types)
+
+    def test_empty_saved_path_skips_output_file(self):
+        from shared.artifact_collector import collect_artifacts as _collect_artifacts
+        with tempfile.TemporaryDirectory() as d:
+            arts = _collect_artifacts(d, "", self.task)
+        types = [a["type"] for a in arts]
+        self.assertNotIn("output_file", types)
+
+    def test_nonexistent_secondary_not_included(self):
+        from shared.artifact_collector import collect_artifacts as _collect_artifacts
+        with tempfile.TemporaryDirectory() as d:
+            saved = os.path.join(d, "out.md")
+            with open(saved, "w") as f:
+                f.write("output\n")
+            # No secondary artifacts written
+            arts = _collect_artifacts(d, saved, self.task)
+        types = [a["type"] for a in arts]
+        self.assertNotIn("deployment_report", types)
+        self.assertNotIn("release_notes", types)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

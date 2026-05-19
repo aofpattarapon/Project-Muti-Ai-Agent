@@ -9,6 +9,7 @@ import {
   markApprovalItemProcessed,
   updateApprovalDecision,
   upsertProjectHotCache,
+  upsertTaskArtifact,
 } from "@/lib/agents/query";
 
 function readSyncToken(request: Request) {
@@ -65,6 +66,9 @@ export async function POST(request: Request) {
     project_id?: string;
     role_task_id?: string;
     discord_message_id?: string;
+    // Model observability + artifact registry
+    metadata?: Record<string, unknown>;
+    artifacts?: Array<{ type: string; path?: string; ref?: string }>;
   };
 
   const roleKey = body.role_key?.trim().toLowerCase() ?? "";
@@ -83,6 +87,10 @@ export async function POST(request: Request) {
     );
   }
 
+  const sdlcTaskId = body.sdlc_task_id?.trim() ?? "";
+  const projectId = body.project_id?.trim() ?? "";
+  const metadataJson = body.metadata ? JSON.stringify(body.metadata) : "{}";
+
   const created = createAgentActivityLog({
     roleKey,
     eventType,
@@ -91,7 +99,27 @@ export async function POST(request: Request) {
     summary,
     artifactRef: body.artifact_ref?.trim(),
     channelTarget: body.channel_target?.trim() ?? "project-sync",
+    sdlcTaskId,
+    projectId,
+    metadata: metadataJson,
   });
+
+  // Upsert artifact registry when sdlc_task_id is present
+  if (created && sdlcTaskId) {
+    const artifacts = body.artifacts ?? [];
+    for (const art of artifacts) {
+      if (art.type) {
+        upsertTaskArtifact({
+          sdlcTaskId,
+          projectId,
+          roleKey,
+          artifactType: art.type,
+          artifactPath: art.path ?? "",
+          artifactRef: art.ref ?? "",
+        });
+      }
+    }
+  }
 
   if (created && status === "waiting_approval") {
     createApprovalItem({
@@ -102,8 +130,8 @@ export async function POST(request: Request) {
       outputSummary: summary,
       requestedBy: roleKey,
       channelTarget: body.channel_target?.trim() ?? "project-sync",
-      projectId: body.project_id?.trim() ?? "",
-      sdlcTaskId: body.sdlc_task_id?.trim() ?? "",
+      projectId,
+      sdlcTaskId,
       roleTaskId: body.role_task_id?.trim() ?? "",
       discordMessageId: body.discord_message_id?.trim() ?? "",
       sourceRuntime: "discord",
@@ -119,7 +147,6 @@ export async function POST(request: Request) {
   const decisionStatus = DECISION_EVENT_MAP[eventType];
   if (created && decisionStatus) {
     // Prefer exact lookup by sdlc_task_id; fall back to role+name for legacy items
-    const sdlcTaskId = body.sdlc_task_id?.trim() ?? "";
     const item = sdlcTaskId
       ? (findApprovalItemBySdlcTaskId(sdlcTaskId) ?? findLatestPendingApprovalItem(roleKey, taskName))
       : findLatestPendingApprovalItem(roleKey, taskName);

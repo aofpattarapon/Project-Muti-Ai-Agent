@@ -43,6 +43,9 @@ from shared.execution_contract import (
 )
 
 
+from shared.artifact_collector import collect_artifacts as _collect_artifacts
+
+
 class BaseAgent(ABC):
     """Base class สำหรับทุก Role Agent — shared execution contract + dynamic routing"""
 
@@ -1632,6 +1635,11 @@ class BaseAgent(ABC):
             self.storage.set_sdlc_task_approval_msg(task.id, _discord_msg_id)
 
         # ─── G1: Web bridge — task completed ────────────────────────
+        _routed_model = routing.get("model_id", "")
+        _fallback_used = bool(
+            _preferred_model_key and _actual_model != _preferred_model_key
+        )
+        _artifacts = _collect_artifacts(output_dir, saved_path, task)
         await get_bridge().task_completed(
             role_key=self.role_name,
             project_id=task.project_id,
@@ -1647,6 +1655,10 @@ class BaseAgent(ABC):
             status=_initial_status,  # auto→"completed" skips approval_item creation
             sdlc_task_id=task.id,
             discord_message_id=_discord_msg_id,
+            preferred_model=_preferred_model_key or "",
+            routed_model=_routed_model,
+            fallback_used=_fallback_used,
+            artifacts=_artifacts,
         )
 
         # ─── Auto-approve mode ────────────────────────────────────────

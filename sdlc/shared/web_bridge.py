@@ -157,6 +157,11 @@ class WebAppBridge:
         status: str = "waiting_approval",
         sdlc_task_id: str = "",
         discord_message_id: str = "",
+        preferred_model: str = "",
+        routed_model: str = "",
+        fallback_used: bool = False,
+        artifacts: Optional[list] = None,
+        error_info: str = "",
     ):
         """Agent ทำเสร็จ — status default = waiting_approval (role_tasks) หรือ completed (sdlc_tasks)"""
         artifact_url = (
@@ -175,14 +180,21 @@ class WebAppBridge:
             "sdlc_task_id":       sdlc_task_id,
             "project_id":         project_id,
             "discord_message_id": discord_message_id,
+            # Artifact registry entries
+            "artifacts":          artifacts or [],
             "metadata": {
                 "project_id":       project_id,
                 "project_name":     project_name,
                 "files":            files,
+                # Model observability
                 "model_id":         model_id,
+                "preferred_model":  preferred_model,
+                "routed_model":     routed_model,
+                "fallback_used":    fallback_used,
                 "cost_usd":         round(cost_usd, 6),
                 "duration_seconds": round(duration_seconds, 1),
                 "revision_count":   revision_count,
+                "error_info":       error_info,
                 "completed_at":     datetime.utcnow().isoformat() + "Z",
                 "artifact_url":     artifact_url,
             },
