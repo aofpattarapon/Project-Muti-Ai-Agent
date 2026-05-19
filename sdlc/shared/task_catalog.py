@@ -86,7 +86,7 @@ TASK_CATALOG: Dict[str, List[dict]] = {
             "output_format": "word",
             "depends_on_types": [],
             "scope": "epic",
-            "preferred_model": "claude-sonnet-4-6",
+            "preferred_model": "claude-cli/claude-sonnet-4-6",
         },
         {
             "task_type": "srs",
@@ -95,7 +95,7 @@ TASK_CATALOG: Dict[str, List[dict]] = {
             "output_format": "word",
             "depends_on_types": ["brd"],
             "scope": "epic",
-            "preferred_model": "claude-sonnet-4-6",
+            "preferred_model": "claude-cli/claude-sonnet-4-6",
         },
         {
             "task_type": "user_stories",
@@ -202,7 +202,7 @@ TASK_CATALOG: Dict[str, List[dict]] = {
             "output_format": "yaml",
             "depends_on_types": ["sequence_diagram"],
             "scope": "epic",
-            "preferred_model": "claude-sonnet-4-6",
+            "preferred_model": "claude-cli/claude-sonnet-4-6",
         },
         {
             "task_type": "sa_data_dictionary",
@@ -229,7 +229,7 @@ TASK_CATALOG: Dict[str, List[dict]] = {
             "output_format": "html",
             "depends_on_types": ["user_flow"],
             "scope": "epic",
-            "preferred_model": "claude-sonnet-4-6",
+            "preferred_model": "claude-cli/claude-sonnet-4-6",
         },
         {
             "task_type": "design_system",
@@ -256,7 +256,7 @@ TASK_CATALOG: Dict[str, List[dict]] = {
             "output_format": "markdown",
             "depends_on_types": [],
             "scope": "epic",
-            "preferred_model": "claude-sonnet-4-6",
+            "preferred_model": "claude-cli/claude-sonnet-4-6",
         },
         {
             "task_type": "frontend_code",
@@ -265,7 +265,7 @@ TASK_CATALOG: Dict[str, List[dict]] = {
             "output_format": "code_multi",
             "depends_on_types": ["frontend_structure"],
             "scope": "epic",
-            "preferred_model": "claude-sonnet-4-6",
+            "preferred_model": "claude-cli/claude-sonnet-4-6",
         },
         {
             "task_type": "backend_structure",
@@ -274,7 +274,7 @@ TASK_CATALOG: Dict[str, List[dict]] = {
             "output_format": "markdown",
             "depends_on_types": [],
             "scope": "epic",
-            "preferred_model": "claude-sonnet-4-6",
+            "preferred_model": "claude-cli/claude-sonnet-4-6",
         },
         {
             "task_type": "backend_code",
@@ -283,7 +283,7 @@ TASK_CATALOG: Dict[str, List[dict]] = {
             "output_format": "code_multi",
             "depends_on_types": ["backend_structure"],
             "scope": "epic",
-            "preferred_model": "claude-sonnet-4-6",
+            "preferred_model": "claude-cli/claude-sonnet-4-6",
         },
         {
             "task_type": "unit_tests",
@@ -292,7 +292,7 @@ TASK_CATALOG: Dict[str, List[dict]] = {
             "output_format": "code_multi",
             "depends_on_types": ["frontend_code", "backend_code"],
             "scope": "epic",
-            "preferred_model": "claude-sonnet-4-6",
+            "preferred_model": "claude-cli/claude-sonnet-4-6",
         },
         {
             "task_type": "dev_readme",
