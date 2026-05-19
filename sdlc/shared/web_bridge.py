@@ -155,6 +155,8 @@ class WebAppBridge:
         revision_count: int = 0,
         artifact_ref: str = "",
         status: str = "waiting_approval",
+        sdlc_task_id: str = "",
+        discord_message_id: str = "",
     ):
         """Agent ทำเสร็จ — status default = waiting_approval (role_tasks) หรือ completed (sdlc_tasks)"""
         artifact_url = (
@@ -162,13 +164,17 @@ class WebAppBridge:
             f"?project={project_id}&role={role_key}"
         )
         await self._post({
-            "roleKey":      role_key,
-            "eventType":    "task_completed",
-            "taskName":     task_name,
-            "status":       status,
-            "summary":      summary[:1000] if summary else "",
-            "artifactRef":  artifact_ref,
-            "channelTarget": f"{role_key}-output",
+            "roleKey":            role_key,
+            "eventType":          "task_completed",
+            "taskName":           task_name,
+            "status":             status,
+            "summary":            summary[:1000] if summary else "",
+            "artifactRef":        artifact_ref,
+            "channelTarget":      f"{role_key}-output",
+            # Identity fields — passed through to approval_item on waiting_approval
+            "sdlc_task_id":       sdlc_task_id,
+            "project_id":         project_id,
+            "discord_message_id": discord_message_id,
             "metadata": {
                 "project_id":       project_id,
                 "project_name":     project_name,
@@ -319,6 +325,24 @@ class WebAppBridge:
                 "project_name": project_name,
             },
         })
+
+    async def mark_decision_processed(self, approval_id: int, status: str = "") -> bool:
+        """
+        Mark a web decision as processed by the bot runtime.
+        Call this after successfully executing the decision in Discord so the
+        item is excluded from future poll results even after a bot restart.
+        """
+        if not self.enabled or not approval_id:
+            return False
+        url = f"{self.base_url}/api/runtime/decisions/{approval_id}/processed"
+        headers = {"Authorization": f"Bearer {self.token}"}
+        try:
+            client = await self._get_client()
+            resp = await client.post(url, json={"status": status}, headers=headers)
+            return resp.status_code == 200 and resp.json().get("success", False)
+        except Exception as e:
+            logger.warning(f"WebAppBridge.mark_decision_processed failed: {e}")
+            return False
 
     async def fetch_web_decisions(self, role_key: str, since_id: int = 0) -> list:
         """

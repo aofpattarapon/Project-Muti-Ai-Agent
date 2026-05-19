@@ -7,6 +7,7 @@ import { seedInitialBackofficeData, seedInitialUsers } from "@/lib/db/seed";
 import {
   createCoreSchema,
   ensureAgentRoleConfigExpansionColumns,
+  ensureApprovalItemIdentityColumns,
   ensureUserMfaColumns,
   ensureUserSessionVersionColumn,
   ensureUserStatusColumn,
@@ -34,6 +35,7 @@ function initializeDatabase(db: Database.Database) {
   ensureUserSessionVersionColumn(db);
   ensureUserMfaColumns(db);
   ensureAgentRoleConfigExpansionColumns(db);
+  ensureApprovalItemIdentityColumns(db);
   seedInitialUsers(db);
   seedInitialBackofficeData(db);
 }

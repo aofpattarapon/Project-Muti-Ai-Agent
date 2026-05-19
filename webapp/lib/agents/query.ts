@@ -67,6 +67,14 @@ export type ApprovalItemRecord = {
   channelTarget: string | null;
   createdAt: string;
   updatedAt: string;
+  // Identity fields for exact Discord/SDLC task mapping
+  projectId: string;
+  sdlcTaskId: string;
+  roleTaskId: string;
+  discordMessageId: string;
+  sourceRuntime: string;
+  processedByRuntimeAt: string | null;
+  runtimeProcessedStatus: string | null;
 };
 
 function safeParseSkillTags(value: string) {
@@ -235,6 +243,13 @@ function mapApprovalItem(
         channel_target: string | null;
         created_at: string;
         updated_at: string;
+        project_id?: string;
+        sdlc_task_id?: string;
+        role_task_id?: string;
+        discord_message_id?: string;
+        source_runtime?: string;
+        processed_by_runtime_at?: string | null;
+        runtime_processed_status?: string | null;
       }
     | undefined,
 ): ApprovalItemRecord | null {
@@ -256,6 +271,13 @@ function mapApprovalItem(
     channelTarget: row.channel_target,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    projectId: row.project_id ?? "",
+    sdlcTaskId: row.sdlc_task_id ?? "",
+    roleTaskId: row.role_task_id ?? "",
+    discordMessageId: row.discord_message_id ?? "",
+    sourceRuntime: row.source_runtime ?? "discord",
+    processedByRuntimeAt: row.processed_by_runtime_at ?? null,
+    runtimeProcessedStatus: row.runtime_processed_status ?? null,
   };
 }
 
@@ -689,7 +711,9 @@ export function findApprovalItemById(id: number): ApprovalItemRecord | null {
     .prepare(
       `
         SELECT id, role_key, task_name, status, summary, artifact_ref, output_summary,
-               requested_by, approver, decision_note, channel_target, created_at, updated_at
+               requested_by, approver, decision_note, channel_target, created_at, updated_at,
+               project_id, sdlc_task_id, role_task_id, discord_message_id, source_runtime,
+               processed_by_runtime_at, runtime_processed_status
         FROM approval_items
         WHERE id = ?
         LIMIT 1
@@ -710,6 +734,13 @@ export function findApprovalItemById(id: number): ApprovalItemRecord | null {
         channel_target: string | null;
         created_at: string;
         updated_at: string;
+        project_id: string;
+        sdlc_task_id: string;
+        role_task_id: string;
+        discord_message_id: string;
+        source_runtime: string;
+        processed_by_runtime_at: string | null;
+        runtime_processed_status: string | null;
       }
     | undefined;
 
@@ -724,6 +755,11 @@ export function createApprovalItem(input: {
   outputSummary?: string;
   requestedBy: string;
   channelTarget?: string;
+  projectId?: string;
+  sdlcTaskId?: string;
+  roleTaskId?: string;
+  discordMessageId?: string;
+  sourceRuntime?: string;
 }) {
   const now = new Date().toISOString();
 
@@ -732,9 +768,10 @@ export function createApprovalItem(input: {
       `
         INSERT INTO approval_items (
           role_key, task_name, status, summary, artifact_ref, output_summary,
-          requested_by, approver, decision_note, channel_target, created_at, updated_at
+          requested_by, approver, decision_note, channel_target, created_at, updated_at,
+          project_id, sdlc_task_id, role_task_id, discord_message_id, source_runtime
         )
-        VALUES (?, ?, 'waiting_approval', ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
+        VALUES (?, ?, 'waiting_approval', ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
     )
     .run(
@@ -747,6 +784,11 @@ export function createApprovalItem(input: {
       input.channelTarget ?? null,
       now,
       now,
+      input.projectId ?? "",
+      input.sdlcTaskId ?? "",
+      input.roleTaskId ?? "",
+      input.discordMessageId ?? "",
+      input.sourceRuntime ?? "discord",
     );
 
   return result.lastInsertRowid;
@@ -760,7 +802,9 @@ export function findLatestPendingApprovalItem(
     .prepare(
       `
         SELECT id, role_key, task_name, status, summary, artifact_ref, output_summary,
-               requested_by, approver, decision_note, channel_target, created_at, updated_at
+               requested_by, approver, decision_note, channel_target, created_at, updated_at,
+               project_id, sdlc_task_id, role_task_id, discord_message_id, source_runtime,
+               processed_by_runtime_at, runtime_processed_status
         FROM approval_items
         WHERE role_key = ? AND task_name = ? AND status = 'waiting_approval'
         ORDER BY id DESC
@@ -782,9 +826,72 @@ export function findLatestPendingApprovalItem(
         channel_target: string | null;
         created_at: string;
         updated_at: string;
+        project_id: string;
+        sdlc_task_id: string;
+        role_task_id: string;
+        discord_message_id: string;
+        source_runtime: string;
+        processed_by_runtime_at: string | null;
+        runtime_processed_status: string | null;
       }
     | undefined;
   return row ? mapApprovalItem(row) : null;
+}
+
+export function findApprovalItemBySdlcTaskId(sdlcTaskId: string): ApprovalItemRecord | null {
+  if (!sdlcTaskId) return null;
+  const row = db
+    .prepare(
+      `
+        SELECT id, role_key, task_name, status, summary, artifact_ref, output_summary,
+               requested_by, approver, decision_note, channel_target, created_at, updated_at,
+               project_id, sdlc_task_id, role_task_id, discord_message_id, source_runtime,
+               processed_by_runtime_at, runtime_processed_status
+        FROM approval_items
+        WHERE sdlc_task_id = ? AND status = 'waiting_approval'
+        ORDER BY id DESC
+        LIMIT 1
+      `,
+    )
+    .get(sdlcTaskId) as
+    | {
+        id: number;
+        role_key: string;
+        task_name: string;
+        status: string;
+        summary: string;
+        artifact_ref: string | null;
+        output_summary: string | null;
+        requested_by: string;
+        approver: string | null;
+        decision_note: string | null;
+        channel_target: string | null;
+        created_at: string;
+        updated_at: string;
+        project_id: string;
+        sdlc_task_id: string;
+        role_task_id: string;
+        discord_message_id: string;
+        source_runtime: string;
+        processed_by_runtime_at: string | null;
+        runtime_processed_status: string | null;
+      }
+    | undefined;
+  return row ? mapApprovalItem(row) : null;
+}
+
+export function markApprovalItemProcessed(id: number, runtimeStatus: string): boolean {
+  const now = new Date().toISOString();
+  const result = db
+    .prepare(
+      `
+        UPDATE approval_items
+        SET processed_by_runtime_at = ?, runtime_processed_status = ?, updated_at = ?
+        WHERE id = ?
+      `,
+    )
+    .run(now, runtimeStatus, now, id);
+  return result.changes > 0;
 }
 
 export function updateApprovalDecision(input: {

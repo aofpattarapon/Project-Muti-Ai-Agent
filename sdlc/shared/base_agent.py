@@ -1164,6 +1164,7 @@ class BaseAgent(ABC):
         task_name = item.get("task_name", "")
         note = item.get("decision_note", "") or ""
         approver = item.get("approver", "web-ui")
+        item_id = item.get("id", 0)
 
         guilds = self.bot.guilds
         if not guilds:
@@ -1173,8 +1174,14 @@ class BaseAgent(ABC):
         approval_ch_id = os.getenv("DISCORD_APPROVAL_CHANNEL_ID")
         approval_ch = guild.get_channel(int(approval_ch_id)) if approval_ch_id else None
 
-        # ─── Try sdlc_task first (new flow) ──────────────────────────────────
-        sdlc_task = self.storage.get_sdlc_task_by_title(task_name, self.role_name)
+        # ─── Prefer sdlc_task_id lookup (exact identity, status-guarded) ─────
+        # Falls back to title lookup (legacy items that predate identity fields)
+        sdlc_task_id_from_item = (item.get("sdlc_task_id") or "").strip()
+        if sdlc_task_id_from_item:
+            sdlc_task = self.storage.get_sdlc_task_waiting_approval(sdlc_task_id_from_item)
+        else:
+            sdlc_task = self.storage.get_sdlc_task_by_title(task_name, self.role_name)
+
         if sdlc_task:
             project = self.storage.get_project(sdlc_task.project_id)
             project_name = project.name if project else sdlc_task.project_id
@@ -1213,6 +1220,9 @@ class BaseAgent(ABC):
                     project_name=project_name, task_name=task_name,
                     reason=note, approver=approver,
                 )
+            # Mark the web approval item processed so it is excluded from future polls
+            if item_id:
+                await get_bridge().mark_decision_processed(item_id, decision)
             return
 
         # ─── Fallback: role_task (legacy flow) ───────────────────────────────
@@ -1271,6 +1281,10 @@ class BaseAgent(ABC):
                 reason=note,
                 approver=approver,
             )
+
+        # Mark the web approval item processed so it is excluded from future polls
+        if item_id:
+            await get_bridge().mark_decision_processed(item_id, decision)
 
     # ─── Pipeline Auto-Trigger ─────────────────────────────────────
     async def _task_poll_loop(self):
@@ -1581,6 +1595,7 @@ class BaseAgent(ABC):
             logger.warning(f"[{self.role_name}] post-task hook error: {_hook_err}")
 
         # ─── Post to output channel + store msg_id for G2 approval ──
+        _discord_msg_id = ""
         if output_ch:
             import urllib.parse as _up
             tier_emoji = {"free": "🆓", "cheap": "💰", "smart": "🧠"}.get(routing["tier"], "")
@@ -1612,8 +1627,9 @@ class BaseAgent(ABC):
                 "> React or use `!sdlc_status` to see all tasks"
             )
             msg = await output_ch.send(embed=embed)
+            _discord_msg_id = str(msg.id)
             # G2: store message ID so !revise / !reject replies can find this task
-            self.storage.set_sdlc_task_approval_msg(task.id, str(msg.id))
+            self.storage.set_sdlc_task_approval_msg(task.id, _discord_msg_id)
 
         # ─── G1: Web bridge — task completed ────────────────────────
         await get_bridge().task_completed(
@@ -1629,6 +1645,8 @@ class BaseAgent(ABC):
             revision_count=task.revision_count,
             artifact_ref=saved_path,
             status="waiting_approval",  # creates approval_item in web DB
+            sdlc_task_id=task.id,
+            discord_message_id=_discord_msg_id,
         )
 
         # ─── Auto-approve mode ────────────────────────────────────────

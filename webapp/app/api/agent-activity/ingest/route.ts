@@ -3,8 +3,10 @@ import { NextResponse } from "next/server";
 import {
   createAgentActivityLog,
   createApprovalItem,
+  findApprovalItemBySdlcTaskId,
   findLatestPendingApprovalItem,
   findSystemConfigByKey,
+  markApprovalItemProcessed,
   updateApprovalDecision,
   upsertProjectHotCache,
 } from "@/lib/agents/query";
@@ -58,6 +60,11 @@ export async function POST(request: Request) {
     hot_cache_scope?: string;
     hot_cache_status?: string;
     hot_cache_key?: string;
+    // Identity fields for exact Discord/SDLC task mapping
+    sdlc_task_id?: string;
+    project_id?: string;
+    role_task_id?: string;
+    discord_message_id?: string;
   };
 
   const roleKey = body.role_key?.trim().toLowerCase() ?? "";
@@ -95,6 +102,11 @@ export async function POST(request: Request) {
       outputSummary: summary,
       requestedBy: roleKey,
       channelTarget: body.channel_target?.trim() ?? "project-sync",
+      projectId: body.project_id?.trim() ?? "",
+      sdlcTaskId: body.sdlc_task_id?.trim() ?? "",
+      roleTaskId: body.role_task_id?.trim() ?? "",
+      discordMessageId: body.discord_message_id?.trim() ?? "",
+      sourceRuntime: "discord",
     });
   }
 
@@ -106,7 +118,11 @@ export async function POST(request: Request) {
   };
   const decisionStatus = DECISION_EVENT_MAP[eventType];
   if (created && decisionStatus) {
-    const item = findLatestPendingApprovalItem(roleKey, taskName);
+    // Prefer exact lookup by sdlc_task_id; fall back to role+name for legacy items
+    const sdlcTaskId = body.sdlc_task_id?.trim() ?? "";
+    const item = sdlcTaskId
+      ? (findApprovalItemBySdlcTaskId(sdlcTaskId) ?? findLatestPendingApprovalItem(roleKey, taskName))
+      : findLatestPendingApprovalItem(roleKey, taskName);
     if (item) {
       updateApprovalDecision({
         id: item.id,
@@ -114,6 +130,8 @@ export async function POST(request: Request) {
         approver: "discord",
         decisionNote: summary,
       });
+      // Mark as processed so the bot poll loop skips it on restart
+      markApprovalItemProcessed(item.id, decisionStatus);
     }
   }
 

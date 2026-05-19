@@ -38,17 +38,23 @@ export async function GET(request: Request) {
 
   const query = roleKey
     ? `SELECT id, role_key, task_name, status, summary, artifact_ref, output_summary,
-              requested_by, approver, decision_note, channel_target, created_at, updated_at
+              requested_by, approver, decision_note, channel_target, created_at, updated_at,
+              project_id, sdlc_task_id, role_task_id, discord_message_id, source_runtime,
+              processed_by_runtime_at, runtime_processed_status
        FROM approval_items
        WHERE status != 'waiting_approval'
+         AND processed_by_runtime_at IS NULL
          AND role_key = ?
          AND id > ?
          AND datetime(updated_at) >= datetime(?)
        ORDER BY id ASC LIMIT 20`
     : `SELECT id, role_key, task_name, status, summary, artifact_ref, output_summary,
-              requested_by, approver, decision_note, channel_target, created_at, updated_at
+              requested_by, approver, decision_note, channel_target, created_at, updated_at,
+              project_id, sdlc_task_id, role_task_id, discord_message_id, source_runtime,
+              processed_by_runtime_at, runtime_processed_status
        FROM approval_items
        WHERE status != 'waiting_approval'
+         AND processed_by_runtime_at IS NULL
          AND id > ?
          AND datetime(updated_at) >= datetime(?)
        ORDER BY id ASC LIMIT 50`;

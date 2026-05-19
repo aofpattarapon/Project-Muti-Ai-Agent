@@ -276,6 +276,33 @@ export function ensureUserMfaColumns(db: Database.Database) {
   }
 }
 
+export function ensureApprovalItemIdentityColumns(db: Database.Database) {
+  const columns = db.prepare("PRAGMA table_info(approval_items)").all() as { name: string }[];
+  const additions = [
+    { name: "project_id", sql: "ALTER TABLE approval_items ADD COLUMN project_id TEXT NOT NULL DEFAULT ''" },
+    { name: "sdlc_task_id", sql: "ALTER TABLE approval_items ADD COLUMN sdlc_task_id TEXT NOT NULL DEFAULT ''" },
+    { name: "role_task_id", sql: "ALTER TABLE approval_items ADD COLUMN role_task_id TEXT NOT NULL DEFAULT ''" },
+    { name: "discord_message_id", sql: "ALTER TABLE approval_items ADD COLUMN discord_message_id TEXT NOT NULL DEFAULT ''" },
+    { name: "source_runtime", sql: "ALTER TABLE approval_items ADD COLUMN source_runtime TEXT NOT NULL DEFAULT 'discord'" },
+    { name: "processed_by_runtime_at", sql: "ALTER TABLE approval_items ADD COLUMN processed_by_runtime_at TEXT" },
+    { name: "runtime_processed_status", sql: "ALTER TABLE approval_items ADD COLUMN runtime_processed_status TEXT" },
+  ];
+
+  for (const addition of additions) {
+    if (columns.some((c) => c.name === addition.name)) continue;
+    try {
+      db.exec(addition.sql);
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !error.message.toLowerCase().includes("duplicate column name")
+      ) {
+        throw error;
+      }
+    }
+  }
+}
+
 export function ensureAgentRoleConfigExpansionColumns(db: Database.Database) {
   const columns = db.prepare("PRAGMA table_info(agent_role_configs)").all() as { name: string }[];
   const additions = [

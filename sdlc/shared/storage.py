@@ -730,11 +730,21 @@ class Storage:
         )
 
     def get_sdlc_task_by_title(self, task_name: str, role: str) -> Optional[SdlcTask]:
-        """หา sdlc_task โดย title (ใช้ใน web decision poll loop)"""
+        """หา sdlc_task โดย title — only returns tasks in waiting_approval status."""
         with sqlite3.connect(self.db_path) as conn:
             row = conn.execute(
-                "SELECT * FROM sdlc_tasks WHERE role=? AND title=? ORDER BY created_at DESC LIMIT 1",
+                "SELECT * FROM sdlc_tasks WHERE role=? AND title=? AND status='waiting_approval' "
+                "ORDER BY created_at DESC LIMIT 1",
                 (role, task_name),
+            ).fetchone()
+        return self._row_to_sdlc_task(row) if row else None
+
+    def get_sdlc_task_waiting_approval(self, task_id: str) -> Optional[SdlcTask]:
+        """Return task by ID only if currently in waiting_approval status."""
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM sdlc_tasks WHERE id=? AND status='waiting_approval' LIMIT 1",
+                (task_id,),
             ).fetchone()
         return self._row_to_sdlc_task(row) if row else None
 
