@@ -618,6 +618,7 @@ class BaseAgent(ABC):
                 task_name=task.title,
                 next_role=None,
                 approver=str(message.author),
+                sdlc_task_id=task.id,
             )
             try:
                 _updated = self.storage.get_sdlc_task(task.id)
@@ -642,6 +643,7 @@ class BaseAgent(ABC):
                 comment=note,
                 revision_count=revision_num,
                 approver=str(message.author),
+                sdlc_task_id=task.id,
             )
 
         elif intent.action == DecisionAction.REJECT:
@@ -659,6 +661,7 @@ class BaseAgent(ABC):
                 task_name=task.title,
                 reason=reason,
                 approver=str(message.author),
+                sdlc_task_id=task.id,
             )
 
     async def _handle_approve(self, message: discord.Message, task: RoleTask, note: str = ""):
@@ -685,6 +688,7 @@ class BaseAgent(ABC):
             task_name=f"{self.role_name.upper()} Phase",
             next_role=next_role,
             approver=str(message.author),
+            role_task_id=task.id,
         )
 
         if next_role:
@@ -1202,6 +1206,7 @@ class BaseAgent(ABC):
                     role_key=self.role_name, project_id=sdlc_task.project_id,
                     project_name=project_name, task_name=task_name,
                     next_role=None, approver=approver,
+                    sdlc_task_id=sdlc_task.id,
                 )
                 try:
                     _updated = self.storage.get_sdlc_task(sdlc_task.id)
@@ -1215,6 +1220,7 @@ class BaseAgent(ABC):
                     role_key=self.role_name, project_id=sdlc_task.project_id,
                     project_name=project_name, task_name=task_name,
                     comment=note, revision_count=revision_num, approver=approver,
+                    sdlc_task_id=sdlc_task.id,
                 )
             elif decision == "rejected":
                 self.storage.update_sdlc_task_status(sdlc_task.id, "rejected", note)
@@ -1222,6 +1228,7 @@ class BaseAgent(ABC):
                     role_key=self.role_name, project_id=sdlc_task.project_id,
                     project_name=project_name, task_name=task_name,
                     reason=note, approver=approver,
+                    sdlc_task_id=sdlc_task.id,
                 )
             # Mark the web approval item processed so it is excluded from future polls
             if item_id:
@@ -1251,6 +1258,7 @@ class BaseAgent(ABC):
                 task_name=task_name,
                 next_role=next_role,
                 approver=approver,
+                role_task_id=task.id,
             )
             if next_role and approval_ch:
                 self.storage.update_project_role(task.project_id, next_role, "in_progress")
@@ -1268,6 +1276,7 @@ class BaseAgent(ABC):
                 comment=note,
                 revision_count=revision_count,
                 approver=approver,
+                role_task_id=task.id,
             )
             await self._execute_and_post_approval(
                 project, {"revision_comment": note, "revision_count": revision_count}, guild
@@ -1283,6 +1292,7 @@ class BaseAgent(ABC):
                 task_name=task_name,
                 reason=note,
                 approver=approver,
+                role_task_id=task.id,
             )
 
         # Mark the web approval item processed so it is excluded from future polls

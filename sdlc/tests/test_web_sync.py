@@ -783,5 +783,113 @@ class TestCollectArtifacts(unittest.TestCase):
         self.assertNotIn("release_notes", types)
 
 
+class TestDecisionIdentityFields(unittest.TestCase):
+    """Phase 6.1: approved/revision_requested/rejected include top-level identity fields."""
+
+    def setUp(self):
+        from shared.web_bridge import WebAppBridge
+        self.bridge = WebAppBridge()
+        self.bridge.enabled = True
+        self.posted: list[dict] = []
+
+        async def fake_post(payload):
+            self.posted.append(payload)
+            return True
+
+        self.bridge._post = fake_post
+
+    def _run(self, coro):
+        return asyncio.get_event_loop().run_until_complete(coro)
+
+    def test_approved_includes_sdlc_task_id_top_level(self):
+        self._run(self.bridge.approved(
+            role_key="dev",
+            project_id="proj-123",
+            project_name="MyProject",
+            task_name="DEV Phase",
+            next_role=None,
+            sdlc_task_id="sdlc-task-abc",
+        ))
+        self.assertEqual(len(self.posted), 1)
+        p = self.posted[0]
+        self.assertEqual(p["sdlc_task_id"], "sdlc-task-abc")
+        self.assertEqual(p["project_id"], "proj-123")
+        self.assertEqual(p["eventType"], "approved")
+
+    def test_revision_requested_includes_sdlc_task_id_top_level(self):
+        self._run(self.bridge.revision_requested(
+            role_key="qa",
+            project_id="proj-456",
+            project_name="MyProject",
+            task_name="QA Phase",
+            comment="Fix tests",
+            revision_count=2,
+            sdlc_task_id="sdlc-task-def",
+        ))
+        self.assertEqual(len(self.posted), 1)
+        p = self.posted[0]
+        self.assertEqual(p["sdlc_task_id"], "sdlc-task-def")
+        self.assertEqual(p["project_id"], "proj-456")
+        self.assertEqual(p["eventType"], "revision_requested")
+
+    def test_rejected_includes_sdlc_task_id_top_level(self):
+        self._run(self.bridge.rejected(
+            role_key="sa",
+            project_id="proj-789",
+            project_name="MyProject",
+            task_name="SA Phase",
+            reason="Out of scope",
+            sdlc_task_id="sdlc-task-ghi",
+        ))
+        self.assertEqual(len(self.posted), 1)
+        p = self.posted[0]
+        self.assertEqual(p["sdlc_task_id"], "sdlc-task-ghi")
+        self.assertEqual(p["project_id"], "proj-789")
+        self.assertEqual(p["eventType"], "rejected")
+
+    def test_approved_legacy_has_role_task_id_no_sdlc_task_id(self):
+        """Legacy role_task flow: role_task_id present, sdlc_task_id empty."""
+        self._run(self.bridge.approved(
+            role_key="dev",
+            project_id="proj-legacy",
+            project_name="Legacy",
+            task_name="DEV Phase",
+            next_role="qa",
+            role_task_id="rt-999",
+        ))
+        p = self.posted[0]
+        self.assertEqual(p["role_task_id"], "rt-999")
+        self.assertEqual(p["sdlc_task_id"], "")
+
+    def test_revision_includes_discord_message_id(self):
+        self._run(self.bridge.revision_requested(
+            role_key="dev",
+            project_id="proj-123",
+            project_name="X",
+            task_name="T",
+            comment="redo",
+            revision_count=1,
+            sdlc_task_id="sdlc-xyz",
+            discord_message_id="discord-msg-111",
+        ))
+        p = self.posted[0]
+        self.assertEqual(p["discord_message_id"], "discord-msg-111")
+        self.assertEqual(p["sdlc_task_id"], "sdlc-xyz")
+
+    def test_default_empty_identity_fields_when_not_passed(self):
+        """All new fields default to empty string when not passed."""
+        self._run(self.bridge.approved(
+            role_key="pm",
+            project_id="proj-001",
+            project_name="P",
+            task_name="T",
+            next_role=None,
+        ))
+        p = self.posted[0]
+        self.assertEqual(p["sdlc_task_id"], "")
+        self.assertEqual(p["discord_message_id"], "")
+        self.assertEqual(p["role_task_id"], "")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

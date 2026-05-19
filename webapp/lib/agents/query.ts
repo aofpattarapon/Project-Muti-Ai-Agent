@@ -1300,6 +1300,34 @@ export function findLatestTaskLog(sdlcTaskId: string): AgentActivityLogRecord | 
   return mapAgentActivityLog(row);
 }
 
+export function findLatestTaskCompletionLog(sdlcTaskId: string): AgentActivityLogRecord | null {
+  const row = db
+    .prepare(
+      `SELECT id, role_key, event_type, task_name, status, summary, artifact_ref, channel_target,
+              created_at, sdlc_task_id, project_id, metadata
+       FROM agent_activity_logs
+       WHERE sdlc_task_id = ? AND event_type = 'task_completed'
+       ORDER BY id DESC LIMIT 1`,
+    )
+    .get(sdlcTaskId) as
+    | {
+        id: number;
+        role_key: string;
+        event_type: string;
+        task_name: string;
+        status: string;
+        summary: string;
+        artifact_ref: string | null;
+        channel_target: string | null;
+        created_at: string;
+        sdlc_task_id: string;
+        project_id: string;
+        metadata: string;
+      }
+    | undefined;
+  return mapAgentActivityLog(row);
+}
+
 export function listTaskStates(opts: {
   projectId?: string;
   roleKey?: string;

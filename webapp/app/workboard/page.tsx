@@ -39,8 +39,11 @@ function buildProjectCards() {
   const logs = listRecentAgentActivityLogs(300);
   const allApprovals = listApprovalItems();
 
-  // Group by taskName → derive project context
+  // Group by sdlcTaskId when present, fall back to taskName for legacy logs.
+  // This prevents cross-project collision when different projects share the same task title.
   const taskMap = new Map<string, {
+    taskKey: string;
+    sdlcTaskId: string;
     taskName: string;
     latestStatus: string;
     latestRoleKey: string;
@@ -53,12 +56,18 @@ function buildProjectCards() {
   }>();
 
   for (const log of logs) {
-    const existing = taskMap.get(log.taskName);
+    const taskKey = log.sdlcTaskId || log.taskName;
+    const existing = taskMap.get(taskKey);
     if (!existing) {
-      const pa = allApprovals.find(
-        (a) => a.taskName === log.taskName && a.status === "waiting_approval"
+      const pa = allApprovals.find((a) =>
+        a.status === "waiting_approval" && (
+          (log.sdlcTaskId && a.sdlcTaskId === log.sdlcTaskId) ||
+          (!log.sdlcTaskId && a.taskName === log.taskName)
+        )
       ) ?? null;
-      taskMap.set(log.taskName, {
+      taskMap.set(taskKey, {
+        taskKey,
+        sdlcTaskId: log.sdlcTaskId ?? "",
         taskName: log.taskName,
         latestStatus: log.status,
         latestRoleKey: log.roleKey,
@@ -192,7 +201,7 @@ export default async function WorkboardPage() {
                 <div className="space-y-3">
                   {lane.items.map((task) => (
                     <article
-                      key={task.taskName}
+                      key={task.taskKey}
                       className={`material-panel-soft rounded-[1.25rem] border-l-4 p-4 ${lane.meta.color}`}
                     >
                       <div className="flex items-start justify-between gap-2">

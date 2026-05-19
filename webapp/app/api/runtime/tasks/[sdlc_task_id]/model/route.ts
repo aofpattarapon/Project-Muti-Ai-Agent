@@ -5,7 +5,7 @@
  *         estimated_cost_usd, duration_seconds, error_info.
  */
 import { NextResponse } from "next/server";
-import { findSystemConfigByKey, findLatestTaskLog } from "@/lib/agents/query";
+import { findSystemConfigByKey, findLatestTaskCompletionLog } from "@/lib/agents/query";
 
 type RouteContext = { params: Promise<{ sdlc_task_id: string }> };
 
@@ -27,7 +27,7 @@ export async function GET(request: Request, context: RouteContext) {
     return NextResponse.json({ success: false, code: "BAD_REQUEST" }, { status: 400 });
   }
 
-  const log = findLatestTaskLog(sdlc_task_id.trim());
+  const log = findLatestTaskCompletionLog(sdlc_task_id.trim());
   if (!log) {
     return NextResponse.json({ success: false, code: "NOT_FOUND" }, { status: 404 });
   }

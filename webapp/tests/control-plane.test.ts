@@ -1,5 +1,5 @@
 /**
- * Phase 6: Control Plane / Web-App Parity Tests
+ * Phase 6 / Phase 6.1: Control Plane / Web-App Parity Tests
  *
  * Tests:
  *  - agent_activity_logs stores sdlc_task_id, project_id, metadata
@@ -9,9 +9,13 @@
  *  - ingest route: completed status (auto-approve) does NOT create approval_item
  *  - /api/runtime/tasks returns task states derived from activity logs
  *  - /api/runtime/tasks/[id]/artifacts returns artifacts for task
- *  - /api/runtime/tasks/[id]/model returns model observability data
+ *  - /api/runtime/tasks/[id]/model returns model observability data (Phase 6.1: not clobbered by later events)
  *  - /api/runtime/tasks/blocked returns devops_blocked events only
  *  - approval idempotency: multiple ingest calls with same sdlc_task_id don't duplicate
+ *  Phase 6.1:
+ *  - approved/revision_requested/rejected activity logs carry sdlc_task_id top-level
+ *  - model endpoint stable after a later approved event
+ *  - duplicate task titles across projects do not collide in task states
  */
 
 import { beforeEach, describe, expect, test } from "vitest";
@@ -450,5 +454,141 @@ describe("GET /api/runtime/tasks/blocked", () => {
   test("returns 401 without auth", async () => {
     const resp = await blockedGet(new Request("http://localhost/api/runtime/tasks/blocked"));
     expect(resp.status).toBe(401);
+  });
+});
+
+// ─── Phase 6.1: Decision events carry sdlc_task_id ────────────────────────────
+
+describe("Phase 6.1: decision events store sdlc_task_id in activity log", () => {
+  test("approved event ingested with sdlc_task_id appears in task state as approved", async () => {
+    const now = new Date().toISOString();
+    // Insert task_completed log first to establish the task
+    db.prepare(`
+      INSERT INTO agent_activity_logs
+        (role_key, event_type, task_name, status, summary, artifact_ref, channel_target,
+         created_at, sdlc_task_id, project_id, metadata)
+      VALUES ('dev','task_completed','${PREFIX}:ApproveStateTest','waiting_approval','done',NULL,NULL,?,?,?,'{}')
+    `).run(now, `${PREFIX}-61-T001`, "proj-61");
+
+    // Simulate an approved event with sdlc_task_id
+    await ingestPost(makePost("http://localhost/api/agent-activity/ingest", {
+      role_key: "dev",
+      event_type: "approved",
+      task_name: `${PREFIX}:ApproveStateTest`,
+      status: "approved",
+      summary: "Approved by human",
+      sdlc_task_id: `${PREFIX}-61-T001`,
+      project_id: "proj-61",
+    }));
+
+    const rows = db.prepare(
+      `SELECT event_type, status, sdlc_task_id FROM agent_activity_logs
+       WHERE sdlc_task_id = ? ORDER BY id`
+    ).all(`${PREFIX}-61-T001`) as Array<{ event_type: string; status: string; sdlc_task_id: string }>;
+
+    expect(rows.length).toBe(2);
+    expect(rows[0].event_type).toBe("task_completed");
+    expect(rows[1].event_type).toBe("approved");
+    expect(rows[1].status).toBe("approved");
+    expect(rows[1].sdlc_task_id).toBe(`${PREFIX}-61-T001`);
+
+    // Latest task state should be approved
+    const tasksResp = await tasksGet(makeGet(`http://localhost/api/runtime/tasks?project_id=proj-61`));
+    const data = (await tasksResp.json()) as { tasks: Array<{ sdlcTaskId: string; lastStatus: string }> };
+    const task = data.tasks.find((t) => t.sdlcTaskId === `${PREFIX}-61-T001`);
+    expect(task?.lastStatus).toBe("approved");
+  });
+
+  test("model endpoint returns task_completed metadata even after a later approved event", async () => {
+    const now = new Date().toISOString();
+    const taskId = `${PREFIX}-61-T002`;
+    const modelMeta = JSON.stringify({
+      model_id: "claude-sonnet-4-6",
+      preferred_model: "ollama/deepseek-r1",
+      routed_model: "claude-sonnet-4-6",
+      fallback_used: false,
+      cost_usd: 0.0012,
+      duration_seconds: 18.0,
+    });
+
+    // Insert task_completed log
+    db.prepare(`
+      INSERT INTO agent_activity_logs
+        (role_key, event_type, task_name, status, summary, artifact_ref, channel_target,
+         created_at, sdlc_task_id, project_id, metadata)
+      VALUES ('dev','task_completed','${PREFIX}:ModelStability','waiting_approval','done',NULL,NULL,?,?,?,?)
+    `).run(now, taskId, "proj-61", modelMeta);
+
+    // Insert later approved event (no model metadata)
+    db.prepare(`
+      INSERT INTO agent_activity_logs
+        (role_key, event_type, task_name, status, summary, artifact_ref, channel_target,
+         created_at, sdlc_task_id, project_id, metadata)
+      VALUES ('dev','approved','${PREFIX}:ModelStability','approved','Approved',NULL,NULL,?,?,?,'{}')
+    `).run(now, taskId, "proj-61");
+
+    const resp = await modelGet(
+      makeGet(`http://localhost/api/runtime/tasks/${taskId}/model`),
+      { params: Promise.resolve({ sdlc_task_id: taskId }) },
+    );
+    expect(resp.status).toBe(200);
+    const data = (await resp.json()) as { model: Record<string, unknown>; last_event_type: string };
+    // Model data comes from the task_completed log, not the approved log
+    expect(data.last_event_type).toBe("task_completed");
+    expect(data.model.actual_model).toBe("claude-sonnet-4-6");
+    expect(data.model.preferred_model).toBe("ollama/deepseek-r1");
+    expect(data.model.estimated_cost_usd).toBeCloseTo(0.0012, 5);
+  });
+
+  test("rework_requested event with sdlc_task_id stored at top level", async () => {
+    const now = new Date().toISOString();
+    await ingestPost(makePost("http://localhost/api/agent-activity/ingest", {
+      role_key: "qa",
+      event_type: "revision_requested",
+      task_name: `${PREFIX}:ReworkTest`,
+      status: "rework_requested",
+      summary: "Please fix tests",
+      sdlc_task_id: `${PREFIX}-61-T003`,
+      project_id: "proj-61",
+    }));
+
+    const row = db.prepare(
+      `SELECT sdlc_task_id, event_type, status FROM agent_activity_logs
+       WHERE task_name = ? ORDER BY id DESC LIMIT 1`
+    ).get(`${PREFIX}:ReworkTest`) as { sdlc_task_id: string; event_type: string; status: string } | undefined;
+
+    expect(row?.sdlc_task_id).toBe(`${PREFIX}-61-T003`);
+    expect(row?.event_type).toBe("revision_requested");
+    expect(row?.status).toBe("rework_requested");
+  });
+
+  test("duplicate task titles across projects do not merge in task states", async () => {
+    const now = new Date().toISOString();
+    // Two different projects, same task title, different sdlc_task_ids
+    db.prepare(`
+      INSERT INTO agent_activity_logs
+        (role_key, event_type, task_name, status, summary, artifact_ref, channel_target,
+         created_at, sdlc_task_id, project_id, metadata)
+      VALUES ('dev','task_completed','Shared Title','waiting_approval','done A',NULL,NULL,?,?,?,'{}')
+    `).run(now, `${PREFIX}-61-PROJ-A`, "proj-alpha");
+
+    db.prepare(`
+      INSERT INTO agent_activity_logs
+        (role_key, event_type, task_name, status, summary, artifact_ref, channel_target,
+         created_at, sdlc_task_id, project_id, metadata)
+      VALUES ('dev','task_completed','Shared Title','approved','done B',NULL,NULL,?,?,?,'{}')
+    `).run(now, `${PREFIX}-61-PROJ-B`, "proj-beta");
+
+    const resp = await tasksGet(makeGet("http://localhost/api/runtime/tasks"));
+    const data = (await resp.json()) as { tasks: Array<{ sdlcTaskId: string; lastStatus: string }> };
+
+    const taskA = data.tasks.find((t) => t.sdlcTaskId === `${PREFIX}-61-PROJ-A`);
+    const taskB = data.tasks.find((t) => t.sdlcTaskId === `${PREFIX}-61-PROJ-B`);
+
+    expect(taskA).toBeDefined();
+    expect(taskB).toBeDefined();
+    // They must have independent statuses — not merged
+    expect(taskA?.lastStatus).toBe("waiting_approval");
+    expect(taskB?.lastStatus).toBe("approved");
   });
 });

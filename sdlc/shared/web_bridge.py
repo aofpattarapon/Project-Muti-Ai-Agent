@@ -208,18 +208,26 @@ class WebAppBridge:
         task_name: str,
         next_role: Optional[str],
         approver: str = "human",
+        sdlc_task_id: str = "",
+        discord_message_id: str = "",
+        role_task_id: str = "",
     ):
         """Human กด !approve"""
         await self._post({
-            "roleKey":      role_key,
-            "eventType":    "approved",
-            "taskName":     task_name,
-            "status":       "approved",
-            "summary":      (
+            "roleKey":            role_key,
+            "eventType":          "approved",
+            "taskName":           task_name,
+            "status":             "approved",
+            "summary":            (
                 f"✅ {role_key.upper()} phase approved"
                 + (f" → ส่งต่อ {next_role.upper()}" if next_role else " → Project Complete!")
             ),
-            "channelTarget": f"{role_key}-approve",
+            "channelTarget":      f"{role_key}-approve",
+            # Top-level identity fields for activity log lookup
+            "sdlc_task_id":       sdlc_task_id,
+            "project_id":         project_id,
+            "discord_message_id": discord_message_id,
+            "role_task_id":       role_task_id,
             "metadata": {
                 "project_id":   project_id,
                 "project_name": project_name,
@@ -238,15 +246,23 @@ class WebAppBridge:
         comment: str,
         revision_count: int,
         approver: str = "human",
+        sdlc_task_id: str = "",
+        discord_message_id: str = "",
+        role_task_id: str = "",
     ):
         """Human กด !revise"""
         await self._post({
-            "roleKey":      role_key,
-            "eventType":    "revision_requested",
-            "taskName":     task_name,
-            "status":       "rework_requested",
-            "summary":      f"🔄 Revision #{revision_count} — {comment or '(ไม่มี comment)'}",
-            "channelTarget": f"{role_key}-approve",
+            "roleKey":            role_key,
+            "eventType":          "revision_requested",
+            "taskName":           task_name,
+            "status":             "rework_requested",
+            "summary":            f"🔄 Revision #{revision_count} — {comment or '(ไม่มี comment)'}",
+            "channelTarget":      f"{role_key}-approve",
+            # Top-level identity fields
+            "sdlc_task_id":       sdlc_task_id,
+            "project_id":         project_id,
+            "discord_message_id": discord_message_id,
+            "role_task_id":       role_task_id,
             "metadata": {
                 "project_id":     project_id,
                 "project_name":   project_name,
@@ -265,15 +281,23 @@ class WebAppBridge:
         task_name: str,
         reason: str,
         approver: str = "human",
+        sdlc_task_id: str = "",
+        discord_message_id: str = "",
+        role_task_id: str = "",
     ):
         """Human กด !reject"""
         await self._post({
-            "roleKey":      role_key,
-            "eventType":    "rejected",
-            "taskName":     task_name,
-            "status":       "rejected",
-            "summary":      f"❌ Rejected at {role_key.upper()} — {reason or '(ไม่ระบุ)'}",
-            "channelTarget": f"{role_key}-approve",
+            "roleKey":            role_key,
+            "eventType":          "rejected",
+            "taskName":           task_name,
+            "status":             "rejected",
+            "summary":            f"❌ Rejected at {role_key.upper()} — {reason or '(ไม่ระบุ)'}",
+            "channelTarget":      f"{role_key}-approve",
+            # Top-level identity fields
+            "sdlc_task_id":       sdlc_task_id,
+            "project_id":         project_id,
+            "discord_message_id": discord_message_id,
+            "role_task_id":       role_task_id,
             "metadata": {
                 "project_id":   project_id,
                 "project_name": project_name,
