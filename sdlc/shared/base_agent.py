@@ -142,13 +142,15 @@ class BaseAgent(ABC):
         task_type: Optional[TaskType] = None,
         max_tokens: int = None,
         use_obsidian: bool = True,
+        force_model_key: str = None,
     ) -> str:
         """
         เรียก LLM ผ่าน Dynamic Router พร้อม DNA injection + Obsidian RAG อัตโนมัติ
 
-        task_type    — ระบุเพื่อ route ไป local model ที่เหมาะก่อน
-        max_tokens   — ถ้าไม่ระบุ ใช้ role token budget จาก role_schemas
-        use_obsidian — inject Obsidian project context (default True)
+        task_type      — ระบุเพื่อ route ไป local model ที่เหมาะก่อน
+        max_tokens     — ถ้าไม่ระบุ ใช้ role token budget จาก role_schemas
+        use_obsidian   — inject Obsidian project context (default True)
+        force_model_key — bypass router; use this exact model key from MODELS dict
         """
         if max_tokens is None:
             max_tokens = get_role_token_budget(self.role_name)
@@ -156,14 +158,33 @@ class BaseAgent(ABC):
         if task_type is None and project_id and project_id in self._execution_contexts:
             task_type = self._execution_contexts[project_id].task_type
 
-        client, complexity = create_client_for_role(
-            role=self.role_name,
-            prompt=prompt,
-            project_id=project_id,
-            force_tier=force_tier,
-            task_type=task_type,
-            system_prompt=self.system_prompt,
-        )
+        if force_model_key:
+            from shared.model_router import MODELS as _MODELS
+            _pref_cfg = _MODELS.get(force_model_key)
+            if _pref_cfg:
+                from shared.llm_client import LLMClient as _LLC
+                client = _LLC(model_config=_pref_cfg, model_key=force_model_key)
+                complexity = 50  # mid-range; router not involved
+                logger.info(f"[{self.role_name}] force_model_key override: {force_model_key}")
+            else:
+                logger.warning(f"[{self.role_name}] force_model_key '{force_model_key}' not in MODELS — falling back to router")
+                client, complexity = create_client_for_role(
+                    role=self.role_name,
+                    prompt=prompt,
+                    project_id=project_id,
+                    force_tier=force_tier,
+                    task_type=task_type,
+                    system_prompt=self.system_prompt,
+                )
+        else:
+            client, complexity = create_client_for_role(
+                role=self.role_name,
+                prompt=prompt,
+                project_id=project_id,
+                force_tier=force_tier,
+                task_type=task_type,
+                system_prompt=self.system_prompt,
+            )
 
         is_free = client.config.tier.value == "free"
         effective_sys = self._effective_system_prompt(is_free_model=is_free)
@@ -566,9 +587,10 @@ class BaseAgent(ABC):
         project_name = project.name if project else task.project_id
 
         if intent.action == DecisionAction.APPROVE:
+            self.storage.update_sdlc_task_status(task.id, "approved", f"Approved by {message.author}")
             await message.channel.send(
                 f"✅ **SDLC Task Approved** — `{task.id}`\n"
-                f"Task `{task.task_type}` marked ✓ (status already `completed`)"
+                f"Task `{task.task_type}` marked approved — downstream tasks unblocked"
                 + (f"\n📝 {intent.note}" if intent.note else "")
             )
             await get_bridge().approved(
@@ -1387,38 +1409,25 @@ class BaseAgent(ABC):
                 _preferred_model_key = _tdef.get("preferred_model")
                 break
 
-        _orig_llm = None
-        if _preferred_model_key:
-            from shared.model_router import MODELS as _MODELS
-            _pref_cfg = _MODELS.get(_preferred_model_key)
-            if _pref_cfg:
-                from shared.llm_client import LLMClient as _LLC
-                _orig_llm = self.llm
-                self.llm = _LLC(model_config=_pref_cfg, model_key=_preferred_model_key)
-                logger.info(f"[{self.role_name}] preferred_model override: {_preferred_model_key} for {task.task_type}")
-
         # ─── Call LLM (G6: show typing indicator while waiting) ──────
         routing = get_router().get_routing_summary(prompt[:300], self.role_name)
         import time as _time
         _start_ts = _time.monotonic()
-        try:
-            if output_ch:
-                async with output_ch.typing():
-                    content = await self.call_llm(
-                        prompt=prompt,
-                        project_id=task.project_id,
-                        project_name=project_name,
-                    )
-            else:
+        if output_ch:
+            async with output_ch.typing():
                 content = await self.call_llm(
                     prompt=prompt,
                     project_id=task.project_id,
                     project_name=project_name,
+                    force_model_key=_preferred_model_key,
                 )
-        finally:
-            # Restore original LLM client
-            if _orig_llm is not None:
-                self.llm = _orig_llm
+        else:
+            content = await self.call_llm(
+                prompt=prompt,
+                project_id=task.project_id,
+                project_name=project_name,
+                force_model_key=_preferred_model_key,
+            )
         _duration = _time.monotonic() - _start_ts
 
         # ─── Save output file ────────────────────────────────────────
@@ -1444,9 +1453,18 @@ class BaseAgent(ABC):
         if tlog_ch and finished:
             await tlog_ch.send(embed=self.timelog.build_finish_embed(finished, project_name))
 
+        # ─── Read approval_mode before setting DB status ─────────────
+        _approval_mode = "manual"
+        _project_obj = self.storage.get_project(task.project_id)
+        if _project_obj:
+            _approval_mode = (_project_obj.metadata or {}).get("approval_mode", "manual")
+
         # ─── Update DB ───────────────────────────────────────────────
+        # auto  → "completed"        : downstream deps pass immediately
+        # manual → "waiting_approval" : downstream blocked until human !approve
+        _initial_status = "completed" if _approval_mode == "auto" else "waiting_approval"
         self.storage.update_sdlc_task_output(task.id, content)
-        self.storage.update_sdlc_task_status(task.id, "completed")
+        self.storage.update_sdlc_task_status(task.id, _initial_status)
 
         # ─── Post-completion hook (override per agent) ───────────────
         try:
@@ -1490,11 +1508,6 @@ class BaseAgent(ABC):
             self.storage.set_sdlc_task_approval_msg(task.id, str(msg.id))
 
         # ─── G1: Web bridge — task completed ────────────────────────
-        _approval_mode = "manual"
-        _project_obj = self.storage.get_project(task.project_id)
-        if _project_obj:
-            _approval_mode = (_project_obj.metadata or {}).get("approval_mode", "manual")
-
         await get_bridge().task_completed(
             role_key=self.role_name,
             project_id=task.project_id,
@@ -1507,7 +1520,7 @@ class BaseAgent(ABC):
             duration_seconds=round(_duration, 1),
             revision_count=task.revision_count,
             artifact_ref=saved_path,
-            status="waiting_approval",  # creates approval_item in web DB; Python DB is already "completed" for downstream deps
+            status="waiting_approval",  # creates approval_item in web DB
         )
 
         # ─── Auto-approve mode ────────────────────────────────────────
