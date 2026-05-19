@@ -601,6 +601,11 @@ class BaseAgent(ABC):
                 next_role=None,
                 approver=str(message.author),
             )
+            try:
+                _updated = self.storage.get_sdlc_task(task.id)
+                await self._on_sdlc_task_completed(_updated or task, (_updated or task).output_data or "")
+            except Exception as _hook_err:
+                logger.warning(f"[{self.role_name}] post-discord-approve hook error: {_hook_err}")
 
         elif intent.action == DecisionAction.REWORK:
             note = intent.note or "Revision requested"
@@ -1167,11 +1172,17 @@ class BaseAgent(ABC):
                 )
 
             if decision == "approved":
+                self.storage.update_sdlc_task_status(sdlc_task.id, "approved", f"Approved by {approver}")
                 await get_bridge().approved(
                     role_key=self.role_name, project_id=sdlc_task.project_id,
                     project_name=project_name, task_name=task_name,
                     next_role=None, approver=approver,
                 )
+                try:
+                    _updated = self.storage.get_sdlc_task(sdlc_task.id)
+                    await self._on_sdlc_task_completed(_updated or sdlc_task, (_updated or sdlc_task).output_data or "")
+                except Exception as _hook_err:
+                    logger.warning(f"[{self.role_name}] post-web-approve hook error: {_hook_err}")
             elif decision == "rework_requested":
                 revision_num = sdlc_task.revision_count + 1
                 self.storage.request_sdlc_task_revision(sdlc_task.id, note or "Web rework")
