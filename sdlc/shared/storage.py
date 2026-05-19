@@ -58,6 +58,11 @@ class SdlcTask:
     notes: str
     created_at: str
     updated_at: str
+    # Execution tracking (added via migration — safe to omit on insert)
+    attempt_count: int = 0   # incremented on each auto-retry; persists across restarts
+    last_error: str = ""     # last failure message
+    claimed_at: str = ""     # ISO timestamp when task was claimed for execution
+    claimed_by: str = ""     # role name that claimed this task
 
 
 class RoleType(str, Enum):
@@ -196,6 +201,16 @@ class Storage:
                     FOREIGN KEY (project_id) REFERENCES projects(id)
                 )
             """)
+            # Migration: add execution-tracking columns if they don't exist yet
+            _sdlc_cols = {r[1] for r in conn.execute("PRAGMA table_info(sdlc_tasks)").fetchall()}
+            for _col, _defn in [
+                ("attempt_count", "INTEGER DEFAULT 0"),
+                ("last_error",    "TEXT DEFAULT ''"),
+                ("claimed_at",    "TEXT DEFAULT ''"),
+                ("claimed_by",    "TEXT DEFAULT ''"),
+            ]:
+                if _col not in _sdlc_cols:
+                    conn.execute(f"ALTER TABLE sdlc_tasks ADD COLUMN {_col} {_defn}")
             conn.commit()
 
     # ─── Project CRUD ───────────────────────────────────────────────────────────
@@ -424,12 +439,18 @@ class Storage:
     def create_sdlc_task(self, task: SdlcTask) -> SdlcTask:
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                "INSERT INTO sdlc_tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                """INSERT INTO sdlc_tasks
+                   (id, project_id, epic_id, task_number, role, task_type, title,
+                    description, output_file, output_format, depends_on, status,
+                    input_data, output_data, approval_msg_id, revision_count, notes,
+                    created_at, updated_at, attempt_count, last_error, claimed_at, claimed_by)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (task.id, task.project_id, task.epic_id, task.task_number, task.role,
                  task.task_type, task.title, task.description, task.output_file,
                  task.output_format, task.depends_on, task.status, task.input_data,
                  task.output_data, task.approval_msg_id, task.revision_count,
-                 task.notes, task.created_at, task.updated_at),
+                 task.notes, task.created_at, task.updated_at,
+                 task.attempt_count, task.last_error, task.claimed_at, task.claimed_by),
             )
             conn.commit()
         return task
@@ -482,6 +503,39 @@ class Storage:
                     "UPDATE sdlc_tasks SET status=?, updated_at=? WHERE id=?",
                     (status, now, task_id),
                 )
+            conn.commit()
+
+    def claim_sdlc_task(self, task_id: str, role: str) -> bool:
+        """Atomically claim a pending task for execution.
+
+        Returns True only when this call wins the race (rowcount == 1).
+        Callers that get False must skip the task — it was already claimed by
+        another process or a previous loop iteration.
+        """
+        now = datetime.utcnow().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "UPDATE sdlc_tasks SET status='in_progress', claimed_by=?, claimed_at=?, updated_at=? "
+                "WHERE id=? AND status='pending'",
+                (role, now, now, task_id),
+            )
+            conn.commit()
+        return cursor.rowcount == 1
+
+    def record_sdlc_task_error(self, task_id: str, error: str, attempt_count: int, requeue: bool = True):
+        """Persist retry state after a task failure.
+
+        requeue=True  → reset status to 'pending' so the poll loop retries
+        requeue=False → set status to 'failed' (max retries exhausted)
+        """
+        now = datetime.utcnow().isoformat()
+        status = "pending" if requeue else "failed"
+        notes = f"Auto-retry {attempt_count}: {error[:300]}" if requeue else error[:300]
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE sdlc_tasks SET status=?, attempt_count=?, last_error=?, notes=?, updated_at=? WHERE id=?",
+                (status, attempt_count, error[:500], notes, now, task_id),
+            )
             conn.commit()
 
     def update_sdlc_task_output(self, task_id: str, output_data):
@@ -558,6 +612,10 @@ class Storage:
             status=row[11], input_data=row[12], output_data=row[13],
             approval_msg_id=row[14], revision_count=row[15], notes=row[16],
             created_at=row[17], updated_at=row[18],
+            attempt_count=row[19] if len(row) > 19 and row[19] is not None else 0,
+            last_error=row[20]   if len(row) > 20 and row[20] is not None else "",
+            claimed_at=row[21]   if len(row) > 21 and row[21] is not None else "",
+            claimed_by=row[22]   if len(row) > 22 and row[22] is not None else "",
         )
 
     def get_sdlc_task_by_title(self, task_name: str, role: str) -> Optional[SdlcTask]:

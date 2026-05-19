@@ -53,8 +53,9 @@ class BaseAgent(ABC):
         self.timelog        = TimeLogger()
         self.bot: commands.Bot = None
         self._output_proc   = OutputProcessor()
-        self._running_task_ids: set = set()  # race-condition guard for sdlc_tasks
-        self._task_fail_counts: dict = {}   # G8: auto-retry counter per task_id
+        self._running_task_ids: set = set()    # in-process guard; DB claim is the authoritative lock
+        self._task_fail_counts: dict = {}     # mirrors attempt_count in DB for the current process
+        self._last_actual_model_key: str = "" # set after each call_llm; reflects fallback if used
         self._execution_contexts: dict[str, ExecutionContext] = {}
         # Default LLM: use claude CLI (no API key needed); falls back to anthropic
         _cli_model = MODELS.get("claude-cli/claude-sonnet-4-6")
@@ -207,7 +208,7 @@ class BaseAgent(ABC):
             except Exception as _rag_err:
                 logger.debug(f"[{self.role_name.upper()}] RAG skipped: {_rag_err}")
 
-        return await client.complete(
+        result = await client.complete(
             system_prompt=effective_sys,
             user_message=prompt,
             max_tokens=max_tokens,
@@ -216,6 +217,9 @@ class BaseAgent(ABC):
             complexity_score=complexity,
             use_dna=False,  # already handled above — don't double-inject
         )
+        # Expose actual model used (may differ from initial plan if fallback fired)
+        self._last_actual_model_key = client.model_key
+        return result
 
     # ─── Bot Setup ─────────────────────────────────────────────────
     def setup_bot(self) -> commands.Bot:
@@ -1327,7 +1331,10 @@ class BaseAgent(ABC):
         for task in tasks:
             if task.id in self._running_task_ids:
                 continue
-            # Guard before any await — prevents race condition duplicate execution
+            # DB-level atomic claim — guards against duplicate execution across restarts
+            # and multiple bot instances. In-memory set above is a fast pre-check only.
+            if not self.storage.claim_sdlc_task(task.id, self.role_name):
+                continue  # lost the race to another process
             self._running_task_ids.add(task.id)
             try:
                 guilds = self.bot.guilds
@@ -1336,23 +1343,21 @@ class BaseAgent(ABC):
                     await self._execute_sdlc_task(task, guilds[0])
             except Exception as e:
                 _MAX_AUTO_RETRIES = 2
-                fail_count = self._task_fail_counts.get(task.id, 0) + 1
-                self._task_fail_counts[task.id] = fail_count
+                # Prefer persisted attempt_count so restarts don't reset the counter
+                _fresh = self.storage.get_sdlc_task(task.id)
+                fail_count = ((_fresh.attempt_count if _fresh else 0) + 1)
+                self._task_fail_counts[task.id] = fail_count  # keep in-memory in sync
                 err_msg = str(e)[:300]
                 if fail_count <= _MAX_AUTO_RETRIES:
-                    # G8: Auto-retry — reset to pending, poll loop will re-pick it up
                     logger.warning(
                         f"[{self.role_name}] sdlc task {task.id} failed "
                         f"(attempt {fail_count}/{_MAX_AUTO_RETRIES}): {err_msg}"
                     )
-                    self.storage.update_sdlc_task_status(
-                        task.id, "pending",
-                        f"Auto-retry {fail_count}/{_MAX_AUTO_RETRIES}: {err_msg}",
-                    )
+                    self.storage.record_sdlc_task_error(task.id, err_msg, fail_count, requeue=True)
                 else:
                     # Exhausted retries — mark permanently failed + notify Discord
                     logger.error(f"[{self.role_name}] sdlc task {task.id} FAILED after {fail_count} attempts: {err_msg}")
-                    self.storage.update_sdlc_task_status(task.id, "failed", err_msg)
+                    self.storage.record_sdlc_task_error(task.id, err_msg, fail_count, requeue=False)
                     self._task_fail_counts.pop(task.id, None)
                     guilds = self.bot.guilds
                     if guilds:
@@ -1376,7 +1381,7 @@ class BaseAgent(ABC):
         output_ch = await get_guild_channel(guild, role_ch.output)  if role_ch else None
         tlog_ch   = await get_guild_channel(guild, role_ch.timelog) if role_ch else None
 
-        self.storage.update_sdlc_task_status(task.id, "in_progress")
+        # Status is already 'in_progress' — set by claim_sdlc_task() before entering here
         log_id = f"{self.role_name}-{task.id}"
 
         # ─── Build context for the prompt ───────────────────────────
@@ -1440,6 +1445,8 @@ class BaseAgent(ABC):
                 force_model_key=_preferred_model_key,
             )
         _duration = _time.monotonic() - _start_ts
+        # actual_model reflects fallback if the primary model failed mid-call
+        _actual_model = self._last_actual_model_key or routing.get("model_id", "unknown")
 
         # ─── Save output file ────────────────────────────────────────
         output_dir = os.path.join(
@@ -1456,7 +1463,7 @@ class BaseAgent(ABC):
         # ─── TimeLog finish ──────────────────────────────────────────
         finished = self.timelog.finish(
             log_id=log_id,
-            model_used=routing["model_id"],
+            model_used=_actual_model,
             cost_usd=routing.get("estimated_cost", 0.0),
             output_files=[task.output_file],
             status="done",
@@ -1500,7 +1507,7 @@ class BaseAgent(ABC):
                 color=0x24e08a,
             )
             embed.add_field(name="Epic", value=f"`{task.epic_id}`", inline=True)
-            embed.add_field(name="Model", value=f"`{routing['model_id']}` {tier_emoji}", inline=True)
+            embed.add_field(name="Model", value=f"`{_actual_model}` {tier_emoji}", inline=True)
             embed.add_field(name="Duration", value=f"{round(_duration)}s", inline=True)
             embed.add_field(
                 name="Output file",
@@ -1526,7 +1533,7 @@ class BaseAgent(ABC):
             task_name=task.title,
             summary=f"[{task.task_type}] {content[:300].replace(chr(10), ' ')}",
             files=[task.output_file],
-            model_id=routing["model_id"],
+            model_id=_actual_model,
             cost_usd=routing.get("estimated_cost", 0.0),
             duration_seconds=round(_duration, 1),
             revision_count=task.revision_count,
