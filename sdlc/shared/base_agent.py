@@ -1579,9 +1579,9 @@ class BaseAgent(ABC):
             raise
 
         # ─── Role Artifact Contract Validation ───────────────────────
-        # Collect artifacts now (post-hook) so generated_artifacts list reflects
-        # exactly what this attempt produced; pass to validator for freshness check.
-        _artifacts = _collect_artifacts(output_dir, saved_path, task)
+        # Collect with freshness filter: secondary files older than attempt start are
+        # excluded so stale files from a prior failed attempt don't pass contract checks.
+        _artifacts = _collect_artifacts(output_dir, saved_path, task, attempt_started_at=_start_wall_ts)
         _gen_names = {a["path"] for a in _artifacts if a.get("path")}
 
         from shared.artifact_contracts import validate_role_artifact_contract

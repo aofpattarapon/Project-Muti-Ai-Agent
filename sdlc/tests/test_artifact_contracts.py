@@ -880,5 +880,170 @@ class TestDBPersistedRetryCounter(unittest.TestCase):
         self.assertEqual(db_fail, 3)  # Confirms the fix
 
 
+# ─── Phase 7.2: Artifact collector freshness filter ──────────────────────────
+
+class TestArtifactCollectorFreshness(unittest.TestCase):
+    """
+    Validates collect_artifacts() freshness filtering and the end-to-end
+    integration with validate_role_artifact_contract() via generated_artifacts.
+
+    Root cause being fixed: before Phase 7.2, _collect_artifacts had no
+    attempt_started_at parameter, so stale secondary files were included in the
+    generated_artifacts list passed to the validator, which then saw them as
+    "produced by current attempt" and skipped the mtime check entirely.
+    """
+
+    # Minimal passing content for DEV:frontend_code
+    # Sections needed: files (has "App.tsx" → ".tsx" alias) + code_blocks ("```")
+    _CONTENT = "## implementation\n- App.tsx\n```\nexport default function App() {}\n```"
+
+    def _task_stub(self, task_type: str = "frontend_code"):
+        """Return a minimal task-like object."""
+        class T:
+            output_file = "output.md"
+        t = T()
+        t.task_type = task_type
+        return t
+
+    def _make_file(self, d: str, fname: str, mtime: float) -> str:
+        fpath = os.path.join(d, fname)
+        with open(fpath, "w") as f:
+            f.write("content")
+        os.utime(fpath, (mtime, mtime))
+        return fpath
+
+    # ── collect_artifacts filtering ────────────────────────────────────────
+
+    def test_stale_secondary_file_excluded_from_artifacts(self):
+        """workspace_manifest.json older than attempt_start is NOT in result."""
+        import time
+        from shared.artifact_collector import collect_artifacts
+        with tempfile.TemporaryDirectory() as d:
+            attempt_start = time.time()
+            self._make_file(d, "workspace_manifest.json", attempt_start - 5.0)
+            saved_path = self._make_file(d, "output.md", attempt_start)
+            task = self._task_stub()
+
+            result = collect_artifacts(d, saved_path, task, attempt_started_at=attempt_start)
+
+            names = [a["path"] for a in result]
+            self.assertNotIn("workspace_manifest.json", names)
+            self.assertIn("output.md", names)  # main output always included
+
+    def test_fresh_secondary_file_included_in_artifacts(self):
+        """workspace_manifest.json with mtime == attempt_start is included."""
+        import time
+        from shared.artifact_collector import collect_artifacts
+        with tempfile.TemporaryDirectory() as d:
+            attempt_start = time.time()
+            self._make_file(d, "workspace_manifest.json", attempt_start)
+            saved_path = self._make_file(d, "output.md", attempt_start)
+            task = self._task_stub()
+
+            result = collect_artifacts(d, saved_path, task, attempt_started_at=attempt_start)
+
+            names = [a["path"] for a in result]
+            self.assertIn("workspace_manifest.json", names)
+
+    def test_no_attempt_started_at_backward_compatible(self):
+        """Without attempt_started_at, stale files are still included (old behavior)."""
+        import time
+        from shared.artifact_collector import collect_artifacts
+        with tempfile.TemporaryDirectory() as d:
+            attempt_start = time.time()
+            # Create a very old file
+            self._make_file(d, "workspace_manifest.json", attempt_start - 3600.0)
+            saved_path = self._make_file(d, "output.md", attempt_start)
+            task = self._task_stub()
+
+            result = collect_artifacts(d, saved_path, task, attempt_started_at=None)
+
+            names = [a["path"] for a in result]
+            self.assertIn("workspace_manifest.json", names)
+
+    def test_main_output_always_included_regardless_of_mtime(self):
+        """The main output_file (saved_path) is always included — it was just written."""
+        import time
+        from shared.artifact_collector import collect_artifacts
+        with tempfile.TemporaryDirectory() as d:
+            attempt_start = time.time()
+            saved_path = self._make_file(d, "output.md", attempt_start - 10.0)
+            task = self._task_stub()
+
+            result = collect_artifacts(d, saved_path, task, attempt_started_at=attempt_start)
+
+            self.assertTrue(any(a["ref"] == saved_path for a in result))
+
+    # ── End-to-end: collector → validator ────────────────────────────────
+
+    def test_contract_fails_when_collector_filters_stale_workspace_manifest(self):
+        """
+        Integration: stale workspace_manifest.json → excluded by collector →
+        generated_artifacts list missing it → contract validation fails.
+        """
+        import time
+        from shared.artifact_collector import collect_artifacts
+        with tempfile.TemporaryDirectory() as d:
+            attempt_start = time.time()
+            # Stale file — predates attempt start
+            self._make_file(d, "workspace_manifest.json", attempt_start - 5.0)
+            saved_path = self._make_file(d, "output.md", attempt_start)
+            task = self._task_stub("frontend_code")
+
+            artifacts = collect_artifacts(d, saved_path, task, attempt_started_at=attempt_start)
+            result = validate_role_artifact_contract(
+                "dev", "frontend_code",
+                self._CONTENT, "typescript",
+                output_dir=d,
+                generated_artifacts=artifacts,
+                attempt_started_at=attempt_start,
+            )
+            self.assertEqual(result.status, "failed")
+            self.assertIn("workspace_manifest.json", result.missing_artifacts)
+
+    def test_contract_passes_when_collector_includes_fresh_workspace_manifest(self):
+        """
+        Integration: fresh workspace_manifest.json → included by collector →
+        generated_artifacts list has it → contract validation passes.
+        """
+        import time
+        from shared.artifact_collector import collect_artifacts
+        with tempfile.TemporaryDirectory() as d:
+            attempt_start = time.time()
+            self._make_file(d, "workspace_manifest.json", attempt_start)
+            saved_path = self._make_file(d, "output.md", attempt_start)
+            task = self._task_stub("frontend_code")
+
+            artifacts = collect_artifacts(d, saved_path, task, attempt_started_at=attempt_start)
+            result = validate_role_artifact_contract(
+                "dev", "frontend_code",
+                self._CONTENT, "typescript",
+                output_dir=d,
+                generated_artifacts=artifacts,
+                attempt_started_at=attempt_start,
+            )
+            self.assertEqual(result.status, "passed")
+
+    def test_stale_file_passed_via_old_path_is_caught_by_validator_mtime(self):
+        """
+        Fallback: if someone calls validator with output_dir but no generated_artifacts,
+        the validator's own mtime check still catches stale files.
+        """
+        import time
+        with tempfile.TemporaryDirectory() as d:
+            attempt_start = time.time()
+            self._make_file(d, "workspace_manifest.json", attempt_start - 5.0)
+
+            result = validate_role_artifact_contract(
+                "dev", "frontend_code",
+                self._CONTENT, "typescript",
+                output_dir=d,
+                generated_artifacts=None,      # no explicit list → mtime path
+                attempt_started_at=attempt_start,
+            )
+            self.assertEqual(result.status, "failed")
+            self.assertIn("workspace_manifest.json", result.missing_artifacts)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
