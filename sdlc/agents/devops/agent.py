@@ -11,6 +11,7 @@ from typing import Optional
 from shared.base_agent import BaseAgent
 from shared.storage import Project, SdlcTask
 from shared.model_router import TaskType
+from shared.web_bridge import get_bridge
 from agents.devops.prompts import DEVOPS_SYSTEM_PROMPT, build_devops_prompt
 from agents.devops.execution_helper import (
     DEVOPSExecutionHelper,
@@ -77,11 +78,26 @@ class DEVOPSAgent(BaseAgent):
                     f"requeued DEV tasks: {requeued}"
                 )
         elif routing == "blocked":
+            summary = self._last_execution_result.get("summary", "")
+            blockers = self._last_execution_result.get("deployment_blockers", [])
             logger.warning(
                 f"[devops] {task.task_type} {task.id} deployment check blocked "
-                f"({self._last_execution_result.get('summary', '')}) — "
-                "infrastructure/tooling issue, human review required"
+                f"({summary}) — infrastructure/tooling issue, human review required"
             )
+            project = self.storage.get_project(task.project_id)
+            project_name = project.name if project else ""
+            try:
+                await get_bridge().devops_blocked(
+                    role_key=self.role_name,
+                    project_id=task.project_id,
+                    project_name=project_name,
+                    task_name=task.title,
+                    task_id=task.id,
+                    blocked_summary=summary,
+                    blockers=blockers,
+                )
+            except Exception as _blocked_err:
+                logger.warning(f"[devops] devops_blocked web notify failed: {_blocked_err}")
 
     async def process_task(self, project: Project, input_data: dict) -> dict:
         prev = input_data.get("previous_output", {})

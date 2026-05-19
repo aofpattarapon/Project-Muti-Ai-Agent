@@ -41,6 +41,7 @@ from agents.devops.execution_helper import (
     run_deployment_checks,
     format_execution_result,
     build_deployment_report,
+    generate_release_notes,
 )
 from shared.storage import Storage, SdlcTask
 from shared.dev_workspace import WorkspacePathError
@@ -932,6 +933,228 @@ class TestRunDeploymentChecksEndToEnd(unittest.TestCase):
         # Result should be passed (syntax is valid Python, py_compile doesn't run it)
         py_check = next(c for c in result["checks"] if c["name"] == "python:py_compile")
         self.assertEqual(py_check["status"], "passed")
+
+
+# ─── Phase 5.2: generate_release_notes ───────────────────────────────────────
+
+class TestGenerateReleaseNotes(unittest.TestCase):
+
+    def test_passed_result_generates_notes(self):
+        result = _build_result(
+            [_check_result("python:py_compile", "python3 -m py_compile", "passed")],
+            workspace_path="/ws", detected_stack=["python"],
+        )
+        content, status = generate_release_notes(result, "t1", "TestApp")
+        self.assertEqual(status, "generated")
+        self.assertIn("release_notes_status:** generated", content)
+        self.assertIn("TestApp", content)
+        self.assertIn("t1", content)
+
+    def test_blocked_result_skips_notes(self):
+        result = _build_result(
+            [_check_result("docker:compose_config", "docker compose config", "blocked",
+                           skip_reason="docker not found")],
+            workspace_path="/ws", detected_stack=["docker"],
+        )
+        content, status = generate_release_notes(result, "t2", "BlockedApp")
+        self.assertEqual(status, "skipped")
+        self.assertIn("release_notes_status:** skipped", content)
+        self.assertIn("blocked", content.lower())
+
+    def test_no_stack_skips_notes(self):
+        result = _build_result([], workspace_path="/ws", detected_stack=[])
+        content, status = generate_release_notes(result, "t3")
+        self.assertEqual(status, "skipped")
+        self.assertIn("release_notes_status:** skipped", content)
+        self.assertIn("no recognized stack", content.lower())
+
+    def test_failed_result_generates_issues_section(self):
+        result = _build_result(
+            [_check_result("python:py_compile", "py_compile", "failed",
+                           stderr_tail="SyntaxError: bad syntax")],
+            workspace_path="/ws", detected_stack=["python"],
+        )
+        content, status = generate_release_notes(result, "t4", "BrokenApp")
+        self.assertEqual(status, "generated")
+        self.assertIn("Issues Found", content)
+        self.assertIn("SyntaxError", content)
+
+    def test_passed_result_includes_checks_passed_section(self):
+        result = _build_result(
+            [_check_result("python:py_compile", "py_compile", "passed",
+                           stdout_tail="All files OK")],
+            workspace_path="/ws", detected_stack=["python"],
+        )
+        content, status = generate_release_notes(result, "t5")
+        self.assertIn("Checks Passed", content)
+        self.assertIn("All files OK", content)
+
+    def test_manual_approval_required_note_always_present(self):
+        result = _build_result(
+            [_check_result("python:py_compile", "py_compile", "passed")],
+            workspace_path="/ws", detected_stack=["python"],
+        )
+        content, _ = generate_release_notes(result, "t6")
+        self.assertIn("Manual approval required", content)
+
+    def test_blocked_note_lists_blockers(self):
+        blockers = ["check1: missing tool", "check2: timeout"]
+        result = _build_result(
+            [_check_result("c1", "cmd", "blocked", skip_reason="missing tool"),
+             _check_result("c2", "cmd", "blocked", skip_reason="timeout")],
+            workspace_path="/ws", detected_stack=["python"],
+        )
+        content, status = generate_release_notes(result, "t7")
+        self.assertEqual(status, "skipped")
+        # blockers should appear in the skipped content
+        self.assertIn("🚫", content)
+
+    def test_project_name_fallback_when_empty(self):
+        result = _build_result([], detected_stack=[])
+        content, _ = generate_release_notes(result, "t8", "")
+        self.assertIn("N/A", content)
+
+
+# ─── Phase 5.2: save_execution_artifact writes release_notes.md ──────────────
+
+class TestSaveExecutionArtifactReleaseNotes(unittest.TestCase):
+
+    def test_release_notes_file_created(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            h = DEVOPSExecutionHelper(_mock_storage())
+            task = _make_task()
+            result = _build_result(
+                [_check_result("python:py_compile", "py_compile", "passed")],
+                workspace_path=out_dir, detected_stack=["python"],
+            )
+            h.save_execution_artifact(task, out_dir, result, "TestProject")
+            notes_path = os.path.join(out_dir, "release_notes.md")
+            self.assertTrue(os.path.isfile(notes_path))
+
+    def test_release_notes_skipped_when_blocked(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            h = DEVOPSExecutionHelper(_mock_storage())
+            task = _make_task()
+            result = _build_result(
+                [_check_result("docker:compose_config", "cmd", "blocked",
+                               skip_reason="docker not found")],
+                workspace_path=out_dir, detected_stack=["docker"],
+            )
+            h.save_execution_artifact(task, out_dir, result, "BlockedProject")
+            notes_path = os.path.join(out_dir, "release_notes.md")
+            self.assertTrue(os.path.isfile(notes_path))
+            with open(notes_path) as f:
+                content = f.read()
+            self.assertIn("release_notes_status:** skipped", content)
+
+    def test_release_notes_generated_when_passed(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            h = DEVOPSExecutionHelper(_mock_storage())
+            task = _make_task()
+            result = _build_result(
+                [_check_result("python:py_compile", "py_compile", "passed",
+                               stdout_tail="OK")],
+                workspace_path=out_dir, detected_stack=["python"],
+            )
+            h.save_execution_artifact(task, out_dir, result, "PassProject")
+            with open(os.path.join(out_dir, "release_notes.md")) as f:
+                content = f.read()
+            self.assertIn("release_notes_status:** generated", content)
+            self.assertIn("PassProject", content)
+
+
+# ─── Phase 5.2: Prompt hardening ─────────────────────────────────────────────
+
+class TestDevopsPromptHardening(unittest.TestCase):
+    def setUp(self):
+        from agents.devops.task_prompts import build_devops_task_prompt
+        self.build = build_devops_task_prompt
+
+    def test_safety_rules_in_every_prompt(self):
+        for task_type in ("dockerfile", "docker_compose", "github_actions", "deployment_guide"):
+            with self.subTest(task_type=task_type):
+                prompt = self.build(task_type, {
+                    "project_name": "TestApp",
+                    "github_actions_content": "# ci",
+                })
+                self.assertIn("Safety Rules", prompt)
+
+    def test_no_real_deployment_claim_in_safety_rule(self):
+        prompt = self.build("dockerfile", {"project_name": "TestApp"})
+        # Must contain the "no deploy จริง" safety note
+        self.assertIn("deployment successful", prompt.lower())
+        # … but as a prohibition, not a claim
+        self.assertIn("ห้าม", prompt)
+
+    def test_blockers_injected_when_present(self):
+        result_with_blockers = {
+            "deployment_blockers": ["check1: docker not found", "check2: npm not found"],
+        }
+        prompt = self.build("dockerfile", {
+            "project_name": "TestApp",
+            "devops_execution_result": result_with_blockers,
+        })
+        self.assertIn("Deployment Blockers", prompt)
+        self.assertIn("check1: docker not found", prompt)
+
+    def test_no_blocker_block_when_no_blockers(self):
+        result_clean = {"deployment_blockers": []}
+        prompt = self.build("dockerfile", {
+            "project_name": "TestApp",
+            "devops_execution_result": result_clean,
+        })
+        # Blocker heading only injected when there are actual blockers
+        self.assertNotIn("🚫 Deployment Blockers", prompt)
+
+    def test_placeholder_hostname_note_present(self):
+        prompt = self.build("deployment_guide", {
+            "project_name": "TestApp",
+            "github_actions_content": "# ci",
+        })
+        self.assertIn("placeholder", prompt.lower())
+
+    def test_manual_approval_note_present(self):
+        prompt = self.build("deployment_guide", {
+            "project_name": "TestApp",
+            "github_actions_content": "# ci",
+        })
+        self.assertIn("Manual approval", prompt)
+
+
+# ─── Phase 5.2: Task catalog preferred_model ─────────────────────────────────
+
+class TestTaskCatalogPreferredModel(unittest.TestCase):
+
+    def setUp(self):
+        from shared.task_catalog import TASK_CATALOG
+        self.devops_tasks = {t["task_type"]: t for t in TASK_CATALOG.get("devops", [])}
+
+    def test_dockerfile_uses_coder_model(self):
+        t = self.devops_tasks.get("dockerfile", {})
+        self.assertEqual(t.get("preferred_model"), "ollama/qwen2.5-coder")
+
+    def test_docker_compose_uses_coder_model(self):
+        t = self.devops_tasks.get("docker_compose", {})
+        self.assertEqual(t.get("preferred_model"), "ollama/qwen2.5-coder")
+
+    def test_github_actions_uses_coder_model(self):
+        t = self.devops_tasks.get("github_actions", {})
+        self.assertEqual(t.get("preferred_model"), "ollama/qwen2.5-coder")
+
+    def test_deployment_guide_uses_reasoning_model(self):
+        t = self.devops_tasks.get("deployment_guide", {})
+        self.assertEqual(t.get("preferred_model"), "ollama/deepseek-r1")
+
+    def test_pipeline_diagram_uses_reasoning_model(self):
+        t = self.devops_tasks.get("pipeline_diagram", {})
+        self.assertEqual(t.get("preferred_model"), "ollama/deepseek-r1")
+
+    def test_all_devops_check_types_have_preferred_model(self):
+        for ttype in ("dockerfile", "docker_compose", "github_actions", "deployment_guide"):
+            with self.subTest(task_type=ttype):
+                t = self.devops_tasks.get(ttype, {})
+                self.assertIn("preferred_model", t,
+                              f"{ttype} missing preferred_model in task_catalog")
 
 
 if __name__ == "__main__":

@@ -345,6 +345,7 @@ TASK_CATALOG: Dict[str, List[dict]] = {
             "output_format": "mermaid",
             "depends_on_types": [],
             "scope": "project",
+            "preferred_model": "ollama/deepseek-r1",
         },
         {
             "task_type": "dockerfile",
@@ -353,6 +354,7 @@ TASK_CATALOG: Dict[str, List[dict]] = {
             "output_format": "dockerfile",
             "depends_on_types": [],
             "scope": "project",
+            "preferred_model": "ollama/qwen2.5-coder",
         },
         {
             "task_type": "docker_compose",
@@ -361,6 +363,7 @@ TASK_CATALOG: Dict[str, List[dict]] = {
             "output_format": "yaml",
             "depends_on_types": ["dockerfile"],
             "scope": "project",
+            "preferred_model": "ollama/qwen2.5-coder",
         },
         {
             "task_type": "github_actions",
@@ -369,6 +372,7 @@ TASK_CATALOG: Dict[str, List[dict]] = {
             "output_format": "yaml",
             "depends_on_types": ["docker_compose"],
             "scope": "project",
+            "preferred_model": "ollama/qwen2.5-coder",
         },
         {
             "task_type": "deployment_guide",
@@ -377,6 +381,7 @@ TASK_CATALOG: Dict[str, List[dict]] = {
             "output_format": "word",
             "depends_on_types": ["github_actions"],
             "scope": "project",
+            "preferred_model": "ollama/deepseek-r1",
         },
     ],
 }

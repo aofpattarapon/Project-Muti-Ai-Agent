@@ -326,6 +326,35 @@ class WebAppBridge:
             },
         })
 
+    async def devops_blocked(
+        self,
+        role_key: str,
+        project_id: str,
+        project_name: str,
+        task_name: str,
+        task_id: str,
+        blocked_summary: str,
+        blockers: list,
+    ):
+        """Notify web app of a blocked DEVOPS deployment check (infra/tooling issue).
+        Logged to agent_activity_logs; does NOT create an approval_item."""
+        detail = "; ".join(blockers[:3]) if blockers else blocked_summary
+        await self._post({
+            "roleKey":       role_key,
+            "eventType":     "devops_blocked",
+            "taskName":      task_name,
+            "status":        "blocked",
+            "summary":       f"🚫 Deployment blocked [{task_id}]: {detail}"[:500],
+            "channelTarget": f"{role_key}-inbox",
+            "metadata": {
+                "project_id":    project_id,
+                "project_name":  project_name,
+                "task_id":       task_id,
+                "blockers":      blockers,
+                "blocked_at":    datetime.utcnow().isoformat() + "Z",
+            },
+        })
+
     async def mark_decision_processed(self, approval_id: int, status: str = "") -> bool:
         """
         Mark a web decision as processed by the bot runtime.

@@ -1644,7 +1644,7 @@ class BaseAgent(ABC):
             duration_seconds=round(_duration, 1),
             revision_count=task.revision_count,
             artifact_ref=saved_path,
-            status="waiting_approval",  # creates approval_item in web DB
+            status=_initial_status,  # auto→"completed" skips approval_item creation
             sdlc_task_id=task.id,
             discord_message_id=_discord_msg_id,
         )

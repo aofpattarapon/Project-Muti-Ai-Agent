@@ -830,6 +830,18 @@ cat backup_20260101.sql | docker compose exec -T postgres psql -U postgres appdb
 }
 
 
+_DEVOPS_SAFETY_RULES = """
+> **⚠️ Safety Rules (MUST follow):**
+> - ห้ามแสดง "deployment successful" หรือ deploy จริง — นี่คือ template/config สำหรับ review เท่านั้น
+> - ถ้ามี deployment blockers ให้แสดงก่อนเสมอ ก่อน output อื่นๆ
+> - ใช้ placeholder hostnames เช่น `your-server.example.com` ห้ามใส่ IP จริงหรือ hostname จริง
+> - Secrets/tokens ต้องอ้างอิงผ่าน environment variables เท่านั้น (เช่น `${{POSTGRES_PASSWORD}}`) ห้าม hardcode
+> - Manual approval required ก่อน production deployment เสมอ — ห้าม auto-deploy
+> - Templates ต้องเป็น template จริง ไม่ใช่ค่าที่ใช้งาน production ได้ทันที
+
+"""
+
+
 def build_devops_task_prompt(task_type: str, context: dict) -> str:
     from shared.output_formatter import safe_format
     from datetime import date
@@ -844,10 +856,20 @@ def build_devops_task_prompt(task_type: str, context: dict) -> str:
         if _exec_ctx else ""
     )
 
+    # Inject blockers-first note when deployment blockers are present
+    _exec_result = context.get("devops_execution_result") or {}
+    _blockers = _exec_result.get("deployment_blockers", []) if isinstance(_exec_result, dict) else []
+    _blocker_block = ""
+    if _blockers:
+        _blocker_lines = "\n".join(f"> - ❌ {b}" for b in _blockers[:5])
+        _blocker_block = (
+            f"\n> **🚫 Deployment Blockers (แสดงในผลลัพธ์ก่อนเสมอ):**\n{_blocker_lines}\n"
+        )
+
     ctx = {
         "today": date.today().strftime("%Y-%m-%d"),
         "tech_stack": "ตามที่กำหนดในโปรเจค (Next.js + FastAPI หรือตามจริง)",
         **context,
         "devops_execution_context": _exec_block,  # always use computed block, not raw value
     }
-    return lang + safe_format(template, ctx)
+    return _DEVOPS_SAFETY_RULES + _blocker_block + lang + safe_format(template, ctx)

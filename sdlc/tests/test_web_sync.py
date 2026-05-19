@@ -491,5 +491,159 @@ class TestIngestIdentityPassthrough(unittest.TestCase):
         self.assertEqual(p["roleKey"], "dev")
 
 
+# ─── Phase 5.2: Auto-approve web sync ────────────────────────────────────────
+
+class TestAutoApproveWebSync(unittest.TestCase):
+    """
+    Verify that task_completed passes the actual _initial_status to web bridge,
+    not a hardcoded "waiting_approval".
+    Auto mode → status="completed" → no approval_item created in webapp.
+    """
+
+    def setUp(self):
+        from shared.web_bridge import WebAppBridge
+        self.bridge = WebAppBridge.__new__(WebAppBridge)
+        self.bridge.enabled = True
+        self.bridge.base_url = "http://localhost:3000"
+        self.bridge._web_url = "http://localhost:3000"
+        self.bridge.token = "test-token"
+        self.bridge._client = None
+        self.posted_payloads = []
+
+        async def fake_post(payload):
+            self.posted_payloads.append(payload)
+
+        self.bridge._post = fake_post
+
+    def _run(self, coro):
+        return asyncio.get_event_loop().run_until_complete(coro)
+
+    def test_auto_mode_sends_completed_status(self):
+        """Auto-approve: status=completed should NOT create approval_item on ingest."""
+        self._run(self.bridge.task_completed(
+            role_key="dev", project_id="p1", project_name="AutoApp",
+            task_name="Backend API", summary="done", files=[], model_id="gpt",
+            cost_usd=0.01, duration_seconds=5.0,
+            status="completed",  # _initial_status from auto mode
+            sdlc_task_id="p1-E001-T001",
+        ))
+        payload = self.posted_payloads[0]
+        # Must send "completed", not "waiting_approval"
+        self.assertEqual(payload["status"], "completed")
+
+    def test_manual_mode_sends_waiting_approval(self):
+        """Manual-approve: status=waiting_approval creates approval_item."""
+        self._run(self.bridge.task_completed(
+            role_key="dev", project_id="p1", project_name="ManualApp",
+            task_name="Backend API", summary="done", files=[], model_id="gpt",
+            cost_usd=0.01, duration_seconds=5.0,
+            status="waiting_approval",
+            sdlc_task_id="p1-E001-T002",
+        ))
+        payload = self.posted_payloads[0]
+        self.assertEqual(payload["status"], "waiting_approval")
+
+    def test_completed_status_payload_still_has_identity(self):
+        """Even in auto mode, identity fields must be present in payload."""
+        self._run(self.bridge.task_completed(
+            role_key="dev", project_id="p99", project_name="AutoApp",
+            task_name="Test Task", summary="done", files=[], model_id="gpt",
+            cost_usd=0.0, duration_seconds=1.0,
+            status="completed",
+            sdlc_task_id="p99-E001-T005",
+            discord_message_id="11223344",
+        ))
+        payload = self.posted_payloads[0]
+        self.assertEqual(payload["sdlc_task_id"], "p99-E001-T005")
+        self.assertEqual(payload["discord_message_id"], "11223344")
+        self.assertEqual(payload["project_id"], "p99")
+
+
+# ─── Phase 5.2: WebBridge devops_blocked ─────────────────────────────────────
+
+class TestWebBridgeDevopsBlocked(unittest.TestCase):
+    """Verify devops_blocked() sends correct payload and does NOT create approval_item."""
+
+    def setUp(self):
+        from shared.web_bridge import WebAppBridge
+        self.bridge = WebAppBridge.__new__(WebAppBridge)
+        self.bridge.enabled = True
+        self.bridge.base_url = "http://localhost:3000"
+        self.bridge._web_url = "http://localhost:3000"
+        self.bridge.token = "test-token"
+        self.bridge._client = None
+        self.posted_payloads = []
+
+        async def fake_post(payload):
+            self.posted_payloads.append(payload)
+
+        self.bridge._post = fake_post
+
+    def _run(self, coro):
+        return asyncio.get_event_loop().run_until_complete(coro)
+
+    def test_event_type_is_devops_blocked(self):
+        self._run(self.bridge.devops_blocked(
+            role_key="devops", project_id="p1", project_name="MyApp",
+            task_name="Dockerfile", task_id="p1-E001-T010",
+            blocked_summary="docker not found",
+            blockers=["docker:compose_config: docker and docker-compose not found"],
+        ))
+        payload = self.posted_payloads[0]
+        self.assertEqual(payload["eventType"], "devops_blocked")
+
+    def test_status_is_blocked(self):
+        self._run(self.bridge.devops_blocked(
+            role_key="devops", project_id="p1", project_name="MyApp",
+            task_name="Dockerfile", task_id="p1-E001-T010",
+            blocked_summary="tools missing", blockers=[],
+        ))
+        payload = self.posted_payloads[0]
+        self.assertEqual(payload["status"], "blocked")
+
+    def test_status_blocked_does_not_equal_waiting_approval(self):
+        """blocked status means NO approval_item will be created on ingest."""
+        self._run(self.bridge.devops_blocked(
+            role_key="devops", project_id="p1", project_name="MyApp",
+            task_name="Dockerfile", task_id="p1-E001-T010",
+            blocked_summary="tools missing", blockers=[],
+        ))
+        payload = self.posted_payloads[0]
+        self.assertNotEqual(payload["status"], "waiting_approval")
+
+    def test_summary_includes_task_id(self):
+        self._run(self.bridge.devops_blocked(
+            role_key="devops", project_id="p1", project_name="MyApp",
+            task_name="Dockerfile", task_id="t-xyz",
+            blocked_summary="infra down", blockers=["check1: missing"],
+        ))
+        payload = self.posted_payloads[0]
+        self.assertIn("t-xyz", payload["summary"])
+
+    def test_real_post_returns_false_when_disabled(self):
+        """When enabled=False, the real _post returns early without HTTP call."""
+        from shared.web_bridge import WebAppBridge
+        bridge = WebAppBridge.__new__(WebAppBridge)
+        bridge.enabled = False
+        bridge.base_url = "http://localhost:3000"
+        bridge._web_url = "http://localhost:3000"
+        bridge.token = ""
+        bridge._client = None
+        # real _post (not replaced): should return False immediately when disabled
+        result = self._run(bridge._post({"roleKey": "devops", "eventType": "devops_blocked",
+                                          "taskName": "x", "status": "blocked", "summary": "x"}))
+        self.assertFalse(result)
+
+    def test_blockers_in_metadata(self):
+        blockers = ["check1: missing tool", "check2: timeout"]
+        self._run(self.bridge.devops_blocked(
+            role_key="devops", project_id="p1", project_name="MyApp",
+            task_name="Dockerfile", task_id="t1",
+            blocked_summary="infra down", blockers=blockers,
+        ))
+        payload = self.posted_payloads[0]
+        self.assertEqual(payload["metadata"]["blockers"], blockers)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
