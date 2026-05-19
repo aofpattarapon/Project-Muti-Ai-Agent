@@ -119,7 +119,7 @@ class BaseAgent(ABC):
         Returned dict is merged into the context passed to _build_sdlc_prompt."""
         return {}
 
-    async def _post_save_hook(self, task: "SdlcTask", output_dir: str) -> None:
+    async def _post_save_hook(self, task: "SdlcTask", output_dir: str, content: str = "") -> None:
         """Called in _execute_sdlc_task after the main artifact is saved.
         Override in subclass to write additional artifacts or inject feedback."""
         pass
@@ -1365,19 +1365,26 @@ class BaseAgent(ABC):
                 _MAX_AUTO_RETRIES = 2
                 # Prefer persisted attempt_count so restarts don't reset the counter
                 _fresh = self.storage.get_sdlc_task(task.id)
-                fail_count = ((_fresh.attempt_count if _fresh else 0) + 1)
-                self._task_fail_counts[task.id] = fail_count  # keep in-memory in sync
                 err_msg = str(e)[:300]
-                if fail_count <= _MAX_AUTO_RETRIES:
-                    logger.warning(
-                        f"[{self.role_name}] sdlc task {task.id} failed "
-                        f"(attempt {fail_count}/{_MAX_AUTO_RETRIES}): {err_msg}"
-                    )
-                    self.storage.record_sdlc_task_error(task.id, err_msg, fail_count, requeue=True)
+                # already_recorded=True means a hook already called record_sdlc_task_error;
+                # use the DB count as-is (no +1) to avoid incrementing attempt_count twice.
+                _already_recorded = getattr(e, "already_recorded", False)
+                if _already_recorded:
+                    fail_count = _fresh.attempt_count if _fresh else 1
                 else:
-                    # Exhausted retries — mark permanently failed + notify Discord
-                    logger.error(f"[{self.role_name}] sdlc task {task.id} FAILED after {fail_count} attempts: {err_msg}")
+                    fail_count = (_fresh.attempt_count if _fresh else 0) + 1
+                self._task_fail_counts[task.id] = fail_count
+                _exhausted = fail_count > _MAX_AUTO_RETRIES
+                if not _already_recorded:
+                    # Normal path: record the error here (single owner)
+                    self.storage.record_sdlc_task_error(
+                        task.id, err_msg, fail_count, requeue=not _exhausted
+                    )
+                elif _exhausted:
+                    # Hook recorded with requeue=True but retries are exhausted — flip to failed
                     self.storage.record_sdlc_task_error(task.id, err_msg, fail_count, requeue=False)
+                if _exhausted:
+                    logger.error(f"[{self.role_name}] sdlc task {task.id} FAILED after {fail_count} attempts: {err_msg}")
                     self._task_fail_counts.pop(task.id, None)
                     role_ch = ROLE_CHANNELS.get(self.role_name)
                     if role_ch:
@@ -1388,6 +1395,11 @@ class BaseAgent(ABC):
                                 f"Failed after {fail_count} attempts. Use `!sdlc_retry {task.id}` to re-queue.\n"
                                 f"Error: `{err_msg}`"
                             )
+                else:
+                    logger.warning(
+                        f"[{self.role_name}] sdlc task {task.id} failed "
+                        f"(attempt {fail_count}/{_MAX_AUTO_RETRIES}): {err_msg}"
+                    )
             finally:
                 self._running_task_ids.discard(task.id)
 
@@ -1531,9 +1543,12 @@ class BaseAgent(ABC):
         # Subclasses (e.g. QA) override this to save extra artifacts
         # or inject feedback into other tasks after the main file is saved.
         try:
-            await self._post_save_hook(task, output_dir)
+            await self._post_save_hook(task, output_dir, content)
         except Exception as _ph_err:
-            logger.warning(f"[{self.role_name}] post-save hook error: {_ph_err}")
+            # Re-raise so the poll loop handles failure (record error, requeue/fail).
+            # Hooks that record errors in DB before raising prevent double-counting.
+            logger.warning(f"[{self.role_name}] post-save hook failed: {_ph_err}")
+            raise
 
         # ─── TimeLog finish ──────────────────────────────────────────
         finished = self.timelog.finish(
@@ -1650,6 +1665,8 @@ class BaseAgent(ABC):
             "epic_priority": input_data.get("epic_priority", "P1"),
             "today": date.today().strftime("%d/%m/%Y"),
             "tech_stack": input_data.get("tech_stack", "ไม่ระบุ (ตัดสินใจตาม requirement)"),
+            "role_feedback": input_data.get("role_feedback", "") or "",
+            "revision_count": task.revision_count,
         }
 
         # Load project_brief if available

@@ -100,7 +100,7 @@ class QAAgent(BaseAgent):
             "qa_execution_formatted": format_execution_result(result),
         }
 
-    async def _post_save_hook(self, task: SdlcTask, output_dir: str) -> None:
+    async def _post_save_hook(self, task: SdlcTask, output_dir: str, content: str = "") -> None:
         """For test_report:
         - Save qa_execution_result.json
         - If failed: requeue DEV code tasks for rework

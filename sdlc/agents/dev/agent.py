@@ -4,14 +4,19 @@ Routing: score-based via model_router (qwen2.5-coder FREE → claude-haiku CHEAP
 Fallback: automatic via call_llm() — never stops on billing/quota errors
 """
 
-import os
 import json
+import logging
+import os
 import subprocess
 import tempfile
 from shared.base_agent import BaseAgent
-from shared.storage import Project
+from shared.storage import Project, SdlcTask
 from shared.model_router import TaskType
 from agents.dev.prompts import DEV_SYSTEM_PROMPT, build_dev_prompt
+from agents.dev.execution_helper import DEVExecutionHelper, _WORKSPACE_TASK_TYPES
+from shared.dev_workspace import WorkspaceWriteError
+
+logger = logging.getLogger(__name__)
 
 
 class DEVAgent(BaseAgent):
@@ -38,6 +43,41 @@ class DEVAgent(BaseAgent):
             "🧪 Test Files": str(len(test_files)),
             "✅ Unit Tests": status,
         }
+
+    async def _post_save_hook(self, task: SdlcTask, output_dir: str, content: str = "") -> None:
+        """Write LLM code output to the workspace and save manifest + diff artifacts.
+
+        Raises WorkspaceWriteError on any write failure so the task is not silently
+        passed to approval — base_agent re-raises this to the poll loop for re-queue.
+        """
+        if task.task_type not in _WORKSPACE_TASK_TYPES:
+            return
+        if not content:
+            return
+        input_data = json.loads(task.input_data or "{}")
+        helper = DEVExecutionHelper(self.storage)
+
+        try:
+            manifest = helper.apply_workspace_writes(task, content, input_data)
+        except Exception as exc:
+            # workspace_path outside allowed base, or OS-level failure
+            err_msg = f"workspace init failed: {exc}"
+            logger.error(f"[dev] {err_msg} — task {task.id}")
+            fresh = self.storage.get_sdlc_task(task.id)
+            attempt = (fresh.attempt_count if fresh else 0) + 1
+            self.storage.record_sdlc_task_error(task.id, err_msg, attempt, requeue=True)
+            raise WorkspaceWriteError(err_msg, already_recorded=True) from exc
+
+        # Always persist manifest for audit even if some writes failed
+        helper.save_artifacts(task, output_dir, manifest)
+
+        logger.info(
+            f"[dev] workspace: {manifest.get('written_count', 0)} written, "
+            f"{manifest.get('failed_count', 0)} failed — task {task.id}"
+        )
+
+        # Raises WorkspaceWriteError + records error in storage if failed_count > 0
+        helper.check_workspace_results(task, manifest)
 
     async def process_task(self, project: Project, input_data: dict) -> dict:
         prev = input_data.get("previous_output", {})

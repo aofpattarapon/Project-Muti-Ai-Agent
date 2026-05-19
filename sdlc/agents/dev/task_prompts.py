@@ -150,6 +150,7 @@ export interface User {{
 ## Project: {project_name}
 ## Epic: {epic_id} — {epic_title}
 ## Goal: {epic_goal}
+{rework_context}
 
 ## Tech Stack (จาก SA + Frontend Structure):
 {frontend_structure_content}
@@ -501,6 +502,7 @@ def get_current_user(
 ## Project: {project_name}
 ## Epic: {epic_id} — {epic_title}
 ## Goal: {epic_goal}
+{rework_context}
 
 ## Backend Structure (จาก DEV planning):
 {backend_structure_content}
@@ -699,6 +701,7 @@ settings = Settings()
 
 ## Project: {project_name}
 ## Epic: {epic_id} — {epic_title}
+{rework_context}
 
 ## Frontend Code (manifest):
 {frontend_code_content}
@@ -1033,5 +1036,20 @@ def build_dev_task_prompt(task_type: str, context: dict) -> str:
     if not template:
         return f"สร้าง {task_type} สำหรับ Epic {context.get('epic_id', '')} โปรเจค {context.get('project_name', '')}"
     lang = "\n> **Language:** ภาษาไทยเป็นหลักสำหรับ description/comment, code และ technical terms ใช้ English ได้เลย เช่น Component, State, Hook, Middleware, Repository, Controller, Service\n\n"
-    ctx = {"today": date.today().strftime("%Y-%m-%d"), **context}
+
+    _feedback = (context.get("role_feedback") or "").strip()
+    _rev = int(context.get("revision_count") or 0)
+    if _rev > 0 and _feedback:
+        _rework = (
+            f"\n## ⚠️ Rework Context — Revision #{_rev}\n"
+            f"QA execution failed. แก้ไข code ตาม feedback ด้านล่าง:\n\n"
+            f"```\n{_feedback}\n```\n\n"
+            f"**สำคัญ:** เขียน files ทั้งหมดที่ได้รับ feedback ใหม่ให้ครบ\n"
+        )
+    elif _rev > 0:
+        _rework = f"\n## ⚠️ Revision #{_rev} — แก้ไขตาม QA feedback\n"
+    else:
+        _rework = ""
+
+    ctx = {"today": date.today().strftime("%Y-%m-%d"), "rework_context": _rework, **context}
     return lang + safe_format(template, ctx)
