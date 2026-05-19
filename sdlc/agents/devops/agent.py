@@ -6,21 +6,82 @@ Fallback: automatic via call_llm() — never stops on billing/quota errors
 
 import os
 import json
-import subprocess
+import logging
+from typing import Optional
 from shared.base_agent import BaseAgent
-from shared.storage import Project
+from shared.storage import Project, SdlcTask
 from shared.model_router import TaskType
 from agents.devops.prompts import DEVOPS_SYSTEM_PROMPT, build_devops_prompt
+from agents.devops.execution_helper import (
+    DEVOPSExecutionHelper,
+    _DEVOPS_CHECK_TASK_TYPES,
+    format_execution_result,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class DEVOPSAgent(BaseAgent):
     def __init__(self):
         super().__init__()
         self.role_name = "devops"
+        self._last_execution_result: Optional[dict] = None
 
     @property
     def system_prompt(self) -> str:
         return DEVOPS_SYSTEM_PROMPT
+
+    def _get_next_role_override(self, output_data: dict) -> Optional[str]:
+        """Route back to DEV if deployment checks detected code failures (not infra/blocked)."""
+        if self._last_execution_result is None:
+            return None
+        helper = DEVOPSExecutionHelper(self.storage)
+        routing = helper.decide_routing(self._last_execution_result)
+        if routing == "rework_dev":
+            return "dev"
+        return None
+
+    async def _pre_llm_hook(self, task: SdlcTask, input_data: dict) -> dict:
+        """For deployment check tasks: run readiness checks and inject results into LLM context."""
+        if task.task_type not in _DEVOPS_CHECK_TASK_TYPES:
+            return {}
+        helper = DEVOPSExecutionHelper(self.storage)
+        result = helper.run_deployment_checks(task, input_data)
+        self._last_execution_result = result
+        return {
+            "devops_execution_result": result,
+            "devops_execution_context": format_execution_result(result),
+        }
+
+    async def _post_save_hook(self, task: SdlcTask, output_dir: str, content: str = "") -> None:
+        """For deployment check tasks:
+        - Save devops_execution_result.json + deployment_readiness_report.md
+        - If failed (code issues): requeue DEV tasks for rework
+        - If blocked (infra/tool): log warning, no auto-requeue
+        """
+        if task.task_type not in _DEVOPS_CHECK_TASK_TYPES or not self._last_execution_result:
+            return
+
+        project = self.storage.get_project(task.project_id)
+        project_name = project.name if project else ""
+
+        helper = DEVOPSExecutionHelper(self.storage)
+        helper.save_execution_artifact(task, output_dir, self._last_execution_result, project_name)
+
+        routing = helper.decide_routing(self._last_execution_result)
+        if routing == "rework_dev":
+            requeued = helper.requeue_dev_tasks(task, self._last_execution_result)
+            if requeued:
+                logger.info(
+                    f"[devops] {task.task_type} {task.id} deployment check failed — "
+                    f"requeued DEV tasks: {requeued}"
+                )
+        elif routing == "blocked":
+            logger.warning(
+                f"[devops] {task.task_type} {task.id} deployment check blocked "
+                f"({self._last_execution_result.get('summary', '')}) — "
+                "infrastructure/tooling issue, human review required"
+            )
 
     async def process_task(self, project: Project, input_data: dict) -> dict:
         prev = input_data.get("previous_output", {})
@@ -32,7 +93,7 @@ class DEVOPSAgent(BaseAgent):
             prompt=prompt,
             project_id=project.id,
             project_name=project.name,
-            task_type=TaskType.CODE_GENERATION,  # routes to qwen2.5-coder free first
+            task_type=TaskType.CODE_GENERATION,
         )
 
         try:
@@ -49,35 +110,6 @@ class DEVOPSAgent(BaseAgent):
                 "deployment_steps": ["ดู deployment_guide.md"],
             }
 
-        # Validate Dockerfile syntax ถ้ามี
-        output_data = await self._validate_docker(output_data)
-        return output_data
-
-    async def _validate_docker(self, output_data: dict) -> dict:
-        """ตรวจสอบ Dockerfile syntax"""
-        dockerfile = output_data.get("files", {}).get("Dockerfile")
-        if not dockerfile:
-            return output_data
-
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode="w", suffix="Dockerfile", delete=False) as f:
-            f.write(dockerfile)
-            fname = f.name
-
-        try:
-            result = subprocess.run(
-                ["docker", "build", "--check", "-f", fname, "."],
-                capture_output=True, text=True, timeout=30
-            )
-            output_data["dockerfile_valid"] = result.returncode == 0
-            output_data["dockerfile_check"] = result.stdout + result.stderr
-        except FileNotFoundError:
-            output_data["dockerfile_valid"] = "Docker not available in sandbox"
-        except Exception as e:
-            output_data["dockerfile_valid"] = f"Check failed: {e}"
-        finally:
-            os.unlink(fname)
-
         return output_data
 
     def _get_role_metrics(self, output_data: dict) -> dict:
@@ -90,11 +122,21 @@ class DEVOPSAgent(BaseAgent):
             )
             services = list(dict.fromkeys(svc))[:6]
         steps = output_data.get("deployment_steps", [])
-        valid = output_data.get("dockerfile_valid", "")
-        docker = "✅ Valid" if valid is True else (f"⚠️ {str(valid)[:30]}" if valid else "—")
+
+        exec_status = "—"
+        if self._last_execution_result:
+            st = self._last_execution_result.get("status", "")
+            icons = {
+                "passed": "✅ Passed",
+                "failed": "❌ Failed",
+                "blocked": "🚫 Blocked",
+                "skipped": "⏭️ Skipped",
+            }
+            exec_status = icons.get(st, st)
+
         return {
             "🚀 Services": ", ".join(services[:4]) if services else "—",
-            "🐳 Dockerfile": docker,
+            "🔍 Deploy Checks": exec_status,
             "📋 Deploy Steps": str(len(steps)) if steps else "—",
         }
 

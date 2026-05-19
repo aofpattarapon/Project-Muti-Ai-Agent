@@ -111,6 +111,8 @@ gitGraph
 - **Project:** {project_name}
 - **Tech Stack:** {tech_stack}
 
+{devops_execution_context}
+
 ## สิ่งที่ต้องส่งมอบ: Dockerfile
 สร้าง **Dockerfile** แบบ multi-stage สำหรับ production
 
@@ -245,6 +247,8 @@ tests/
 
 ## Project:
 - **Project:** {project_name}
+
+{devops_execution_context}
 
 ## สิ่งที่ต้องส่งมอบ: docker-compose.yml
 สร้าง **Docker Compose** สำหรับ local development + staging
@@ -409,6 +413,8 @@ NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
 
 ## Project:
 - **Project:** {project_name}
+
+{devops_execution_context}
 
 ## สิ่งที่ต้องส่งมอบ: .github/workflows/ci.yml
 สร้าง **GitHub Actions CI/CD Workflow**
@@ -661,6 +667,8 @@ jobs:
 ## Project:
 - **Project:** {project_name}
 
+{devops_execution_context}
+
 ## GitHub Actions:
 {github_actions_content}
 
@@ -829,9 +837,17 @@ def build_devops_task_prompt(task_type: str, context: dict) -> str:
     if not template:
         return f"สร้าง {task_type} สำหรับโปรเจค {context.get('project_name', '')}"
     lang = "\n> **Language:** ภาษาไทยเป็นหลักสำหรับ description, config/code ใช้ English ได้เลย เช่น Pipeline, Docker, Container, Registry, Deploy, Rollback, Health Check, Secret\n\n"
+
+    _exec_ctx = (context.get("devops_execution_context") or "").strip()
+    _exec_block = (
+        f"\n## 🔍 Deployment Readiness Checks\n{_exec_ctx}\n"
+        if _exec_ctx else ""
+    )
+
     ctx = {
         "today": date.today().strftime("%Y-%m-%d"),
         "tech_stack": "ตามที่กำหนดในโปรเจค (Next.js + FastAPI หรือตามจริง)",
         **context,
+        "devops_execution_context": _exec_block,  # always use computed block, not raw value
     }
     return lang + safe_format(template, ctx)
