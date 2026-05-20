@@ -1,8 +1,16 @@
 # Phase 9: Runtime Observability & Operator Control Plane
 
-**Status:** Design locked — ready for implementation  
+**Status:** FINALIZED — all sub-phases complete, all tests green  
 **Design date:** 2026-05-20  
 **Prerequisites:** Phase 8 complete (f38e41e)
+
+**Commit sequence (all verified):**
+- 9.0 (7da0dde): design locked (this document)
+- 9.1 (b619505): Recovery status APIs (backend)
+- 9.2 (57fe1a9): Recovery dashboard UI
+- 9.2 hotfix (61eec2f): Lint cleanup — Date.now() out of render, typed aliases
+- 9.3 (cad58ba): Agent pause/resume audit trail
+- 9.4 (b0aa818): hermes3 last-resort cooldown hardening
 
 ---
 
@@ -46,13 +54,13 @@ No direct cross-SQLite reads — concurrent write risk is unacceptable.
 
 ## Phase 9 sub-phase breakdown
 
-### 9.0 — Design & Roadmap (this document, doc-only commit)
+### 9.0 — Design & Roadmap ✅ (this document, doc-only commit)
 
 Lock the plan before any implementation.
 
 ---
 
-### 9.1 — Backend: Recovery Status APIs
+### 9.1 — Backend: Recovery Status APIs ✅
 
 **New file: `outputs/recovery/runtime_status.json`** (written by recovery_worker on each tick)
 
@@ -121,7 +129,7 @@ Alternative (Phase 9.4 stretch): direct webhook to Python bot HTTP endpoint.
 
 ---
 
-### 9.2 — Web UI: Recovery Dashboard
+### 9.2 — Web UI: Recovery Dashboard ✅
 
 **New page: `/recovery`** (added to app-shell sidebar)
 
@@ -152,7 +160,7 @@ Panels on the page:
 
 ---
 
-### 9.3 — Operator Audit Trail Extension
+### 9.3 — Operator Audit Trail Extension ✅
 
 **New audit event types:**
 
@@ -178,7 +186,7 @@ Panels on the page:
 
 ---
 
-### 9.4 — Hardening
+### 9.4 — Hardening ✅
 
 #### hermes3 last-resort cooldown behavior
 
@@ -267,13 +275,14 @@ sdlc/tests/test_phase9_model_router.py — new (hermes3 cooldown edge case)
 
 ---
 
-## Phase 9 commit sequence (planned)
+## Phase 9 commit sequence (completed)
 
 ```
-Phase 9.0: Runtime Observability Roadmap          ← this commit
-Phase 9.1: Recovery status APIs (backend)
-Phase 9.2: Recovery dashboard page
-Phase 9.3: Agent pause/resume audit trail
-Phase 9.4: hermes3 last-resort cooldown hardening
+Phase 9.0: Runtime Observability Roadmap          7da0dde ✅
+Phase 9.1: Recovery status APIs (backend)         b619505 ✅
+Phase 9.2: Recovery dashboard page                57fe1a9 ✅
+Phase 9.2 hotfix: lint + query correctness        61eec2f ✅
+Phase 9.3: Agent pause/resume audit trail         cad58ba ✅
+Phase 9.4: hermes3 last-resort cooldown hardening b0aa818 ✅
 Phase 9 finalization: integration + full test suite
 ```
