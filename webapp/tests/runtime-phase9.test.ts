@@ -126,6 +126,23 @@ describe("GET /api/runtime/paused-tasks", () => {
     expect(body.total).toBe(1);
     expect(body.paused[0].pauseReason).toBe("context_limit");
   });
+
+  test("excludes task when a newer non-paused event exists (resumed/completed)", async () => {
+    // Task was paused, then resumed (a newer event with status != 'paused')
+    seedPauseEvent(TASK_ID, { pause_reason: "rate_limited", pause_provider: "groq", pause_model: "" });
+    // Simulate a resume event arriving after the pause
+    db.prepare(
+      `INSERT INTO agent_activity_logs
+         (role_key, event_type, task_name, status, summary, created_at, sdlc_task_id, project_id, metadata)
+       VALUES ('dev', 'task_resumed', 'Phase9 Task', 'in_progress', 'Resumed by recovery worker', datetime('now'), ?, 'proj-test', '{}')`,
+    ).run(TASK_ID);
+
+    const res = await pausedTasksGet(authorizedGet("http://localhost/api/runtime/paused-tasks"));
+    const body = (await res.json()) as { paused: unknown[]; total: number };
+
+    // Task should NOT appear — it was resumed
+    expect(body.total).toBe(0);
+  });
 });
 
 // ─── POST /api/runtime/paused-tasks/[sdlcTaskId]/resume ──────────────────────

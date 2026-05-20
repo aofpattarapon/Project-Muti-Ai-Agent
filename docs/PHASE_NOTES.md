@@ -30,7 +30,17 @@
       webapp/app/api/runtime/recovery/route.ts: GET — Bearer auth, reads outputs/recovery/tick_history.json newest-first
       webapp/tests/runtime-phase9.test.ts: 13 tests (all green)
       All 128 TypeScript + 11 Python recovery tests green
-  - Next: 9.2 Recovery Dashboard UI → 9.3 Audit Trail → 9.4 hermes3 hardening
+  - 9.2 COMPLETE: Recovery Dashboard UI
+      Prerequisite hotfix: listPausedTaskEvents() now uses correlated MAX(id) subquery — excludes tasks
+        where a newer event (resume/complete) has overridden the paused status.
+      webapp/app/recovery/page.tsx: server component, reads data directly (no auth friction)
+        Panels: Worker Status bar, Paused Task Queue (with ResumeButton for manual_token_fix), 
+                Active Provider Cooldowns, Recovery Tick Log
+        Auto-refresh every 30s via router.refresh()
+      webapp/app/recovery/_components/ResumeButton.tsx: "use client" — POSTs to resume API
+      webapp/app/_components/app-shell.tsx: Recovery nav link in System group
+      14 tests (including resumed-task exclusion test) — 129 total TypeScript tests green
+  - Next: 9.3 Audit Trail → 9.4 hermes3 hardening
 
   Roadmap: docs/PHASE9_ROADMAP.md
 

@@ -1431,16 +1431,16 @@ export type PausedTaskEvent = {
 };
 
 export function listPausedTaskEvents(limit = 100): PausedTaskEvent[] {
+  // Find only tasks where the most recent event overall is 'paused'.
+  // This excludes tasks that were paused but later resumed/completed (their latest
+  // event will have a different status, so the correlated MAX(id) won't match).
   const rows = db
     .prepare(
       `SELECT id, role_key, task_name, sdlc_task_id, project_id, metadata, created_at
-       FROM agent_activity_logs
-       WHERE status = 'paused' AND sdlc_task_id != ''
-         AND id IN (
-           SELECT MAX(id) FROM agent_activity_logs
-           WHERE status = 'paused' AND sdlc_task_id != ''
-           GROUP BY sdlc_task_id
-         )
+       FROM agent_activity_logs a
+       WHERE sdlc_task_id != ''
+         AND status = 'paused'
+         AND id = (SELECT MAX(id) FROM agent_activity_logs WHERE sdlc_task_id = a.sdlc_task_id)
        ORDER BY id DESC LIMIT ?`,
     )
     .all(limit) as Array<{
