@@ -46,6 +46,41 @@ from shared.execution_contract import (
 from shared.artifact_collector import collect_artifacts as _collect_artifacts
 
 
+def _safe_attempt_name(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in value)
+
+
+def _build_attempt_output_dir(output_dir: str, task: SdlcTask) -> str:
+    """Return an isolated staging directory for the current execution attempt."""
+    attempt_no = int(task.attempt_count or 0) + 1
+    stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+    safe_task_id = _safe_attempt_name(task.id)
+    return os.path.join(output_dir, ".attempts", f"{safe_task_id}-attempt-{attempt_no:02d}-{stamp}")
+
+
+def _promote_attempt_artifacts(attempt_dir: str, output_dir: str) -> None:
+    """Copy a validated attempt into the canonical output directory.
+
+    Failed attempts stay under .attempts and never overwrite the approved/final
+    artifact path. Only a contract-passing attempt is promoted.
+    """
+    import shutil
+
+    if not os.path.isdir(attempt_dir):
+        return
+    os.makedirs(output_dir, exist_ok=True)
+    for name in os.listdir(attempt_dir):
+        src = os.path.join(attempt_dir, name)
+        dst = os.path.join(output_dir, name)
+        if os.path.isdir(src):
+            if os.path.exists(dst):
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
+        else:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
+
+
 class BaseAgent(ABC):
     """Base class สำหรับทุก Role Agent — shared execution contract + dynamic routing"""
 
@@ -696,6 +731,19 @@ class BaseAgent(ABC):
                 await self._on_sdlc_task_completed(_updated or task, (_updated or task).output_data or "")
             except Exception as _hook_err:
                 logger.warning(f"[{self.role_name}] post-discord-approve hook error: {_hook_err}")
+                _err = str(_hook_err)[:500]
+                await message.channel.send(
+                    f"⚠️ **Post-Approval Error** — `{task.id}` remains `approved`.\n"
+                    f"No new approval is required.\n"
+                    f"**Reason:** `{_err}`"
+                )
+                await get_bridge().error(
+                    role_key=self.role_name,
+                    project_id=task.project_id,
+                    project_name=project_name,
+                    task_name=task.title,
+                    error_message=f"Post-approval hook failed after approval for {task.id}: {_err}",
+                )
 
         elif intent.action == DecisionAction.REWORK:
             note = intent.note or "Revision requested"
@@ -1285,6 +1333,20 @@ class BaseAgent(ABC):
                     await self._on_sdlc_task_completed(_updated or sdlc_task, (_updated or sdlc_task).output_data or "")
                 except Exception as _hook_err:
                     logger.warning(f"[{self.role_name}] post-web-approve hook error: {_hook_err}")
+                    _err = str(_hook_err)[:500]
+                    if approval_ch:
+                        await approval_ch.send(
+                            f"⚠️ **Post-Approval Error** — `{sdlc_task.id}` remains `approved`.\n"
+                            f"No new approval is required.\n"
+                            f"**Reason:** `{_err}`"
+                        )
+                    await get_bridge().error(
+                        role_key=self.role_name,
+                        project_id=sdlc_task.project_id,
+                        project_name=project_name,
+                        task_name=task_name,
+                        error_message=f"Post-approval hook failed after approval for {sdlc_task.id}: {_err}",
+                    )
             elif decision == "rework_requested":
                 revision_num = sdlc_task.revision_count + 1
                 self.storage.request_sdlc_task_revision(sdlc_task.id, note or "Web rework")
@@ -1646,23 +1708,27 @@ class BaseAgent(ABC):
                 )
             return
 
-        # ─── Save output file ────────────────────────────────────────
+        # ─── Save output file to attempt staging ─────────────────────
+        # Contract checks run against this isolated directory. The canonical
+        # output path is updated only after the attempt passes every check, so
+        # failed retries do not overwrite final artifacts or look approved.
         output_dir = os.path.join(
             os.getenv("OUTPUT_BASE_PATH", "/app/outputs"),
             "projects", task.project_id, task.epic_id, self.role_name,
         )
+        attempt_output_dir = _build_attempt_output_dir(output_dir, task)
         saved_path = save_task_output(
             content=content,
             output_file=task.output_file,
             output_format=task.output_format,
-            output_dir=output_dir,
+            output_dir=attempt_output_dir,
         )
 
         # ─── Role-specific post-save hook ────────────────────────────
         # Subclasses (e.g. QA) override this to save extra artifacts
         # or inject feedback into other tasks after the main file is saved.
         try:
-            await self._post_save_hook(task, output_dir, content)
+            await self._post_save_hook(task, attempt_output_dir, content)
         except Exception as _ph_err:
             # Re-raise so the poll loop handles failure (record error, requeue/fail).
             # Hooks that record errors in DB before raising prevent double-counting.
@@ -1670,10 +1736,11 @@ class BaseAgent(ABC):
             raise
 
         # ─── Role Artifact Contract Validation ───────────────────────
-        # Collect with freshness filter: secondary files older than attempt start are
-        # excluded so stale files from a prior failed attempt don't pass contract checks.
-        _artifacts = _collect_artifacts(output_dir, saved_path, task, attempt_started_at=_start_wall_ts)
-        _gen_names = {a["path"] for a in _artifacts if a.get("path")}
+        # Collect from attempt staging so stale files from previous attempts
+        # cannot pass contract checks or show up as current output.
+        _attempt_artifacts = _collect_artifacts(
+            attempt_output_dir, saved_path, task, attempt_started_at=_start_wall_ts
+        )
 
         from shared.artifact_contracts import validate_role_artifact_contract
         _contract = validate_role_artifact_contract(
@@ -1681,8 +1748,8 @@ class BaseAgent(ABC):
             task_type=task.task_type,
             content=content,
             output_format=task.output_format,
-            output_dir=output_dir,
-            generated_artifacts=_artifacts,
+            output_dir=attempt_output_dir,
+            generated_artifacts=_attempt_artifacts,
             attempt_started_at=_start_wall_ts,
         )
         if _contract.status == "failed":
@@ -1733,6 +1800,12 @@ class BaseAgent(ABC):
                 },
             )
             return
+
+        # The attempt is now valid. Promote it to the canonical location and
+        # build the final artifact list from the promoted files.
+        _promote_attempt_artifacts(attempt_output_dir, output_dir)
+        saved_path = os.path.join(output_dir, task.output_file)
+        _artifacts = _collect_artifacts(output_dir, saved_path, task, attempt_started_at=_start_wall_ts)
 
         # ─── TimeLog finish ──────────────────────────────────────────
         finished = self.timelog.finish(
@@ -2100,6 +2173,7 @@ class BaseAgent(ABC):
                         "epics": "epics_content",
                         "project_charter": "project_charter_content",
                         "project_management_plan": "pm_plan_content",
+                        "project_plan_excel": "project_plan_content",
                         "raci_matrix": "raci_content",
                         "risk_register": "risk_register_content",
                         "communications_plan": "comms_content",

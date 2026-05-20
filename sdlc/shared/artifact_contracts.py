@@ -124,6 +124,25 @@ _CONTRACTS: dict[str, dict[str, dict]] = {
             "secondary_files": [],
             "prompt_hint": "Required: stakeholder list, communication channels.",
         },
+        "project_plan_excel": {
+            "sections": [
+                {"name": "project_plan_sheet",  "aliases": ['"Project Plan"', "'Project Plan'", "Project Plan"]},
+                {"name": "gantt_sheet",          "aliases": ['"Gantt"', "'Gantt'", '"Gantt Chart"']},
+                {"name": "manday_summary_sheet", "aliases": ['"Manday Summary"', "'Manday Summary'"]},
+                {"name": "milestones_sheet",     "aliases": ['"Milestones"', "'Milestones'"]},
+                {"name": "assumptions_sheet",    "aliases": ['"Assumptions"', "'Assumptions'"]},
+                # Use JSON-quoted aliases to avoid substring matches inside sheet names like "Manday Summary"
+                {"name": "manday_column",        "aliases": ['"Manday"', '"manday"']},
+                {"name": "duration_column",      "aliases": ['"Duration Days"', '"Duration days"']},
+                {"name": "owner_agent_column",   "aliases": ['"Owner Agent"', '"Owner agent"']},
+            ],
+            "secondary_files": [],
+            "prompt_hint": (
+                'Required JSON sheets: "Project Plan", "Gantt", "Manday Summary", "Milestones", "Assumptions". '
+                'Required columns: "Manday" (numeric), "Duration Days" (numeric), "Owner Agent". '
+                "Missing any sheet or column will cause automatic retry."
+            ),
+        },
         "project_status_report": {
             "sections": [
                 {"name": "status", "aliases": ["status", "สถานะ"]},

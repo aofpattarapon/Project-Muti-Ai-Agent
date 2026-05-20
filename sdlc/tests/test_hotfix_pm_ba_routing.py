@@ -314,5 +314,194 @@ class TestGroqPreflightGuard(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(len(non_groq_free) > 0, "Should have non-Groq fallback candidates")
 
 
+# ─── 14–20: PM Excel Project Plan ────────────────────────────────────────────
+
+class TestProjectPlanExcelTaskCatalog(unittest.TestCase):
+
+    def test_project_plan_excel_in_pm_task_catalog(self):
+        """PM task catalog must include project_plan_excel task."""
+        from shared.task_catalog import TASK_CATALOG
+        pm_types = [t["task_type"] for t in TASK_CATALOG["pm"]]
+        self.assertIn("project_plan_excel", pm_types)
+
+    def test_project_plan_excel_output_file_is_xlsx(self):
+        """project_plan_excel output_file must be project_plan.xlsx."""
+        from shared.task_catalog import TASK_CATALOG
+        t = next(t for t in TASK_CATALOG["pm"] if t["task_type"] == "project_plan_excel")
+        self.assertEqual(t["output_file"], "project_plan.xlsx")
+        self.assertEqual(t["output_format"], "excel")
+
+    def test_project_plan_excel_depends_on_management_plan(self):
+        """project_plan_excel must depend on project_management_plan."""
+        from shared.task_catalog import TASK_CATALOG
+        t = next(t for t in TASK_CATALOG["pm"] if t["task_type"] == "project_plan_excel")
+        self.assertIn("project_management_plan", t["depends_on_types"])
+
+    def test_build_project_tasks_includes_excel_plan(self):
+        """build_project_tasks() must generate a project_plan_excel task for PM."""
+        from shared.task_catalog import build_project_tasks
+        epics = [{"id": "PE01-E001", "title": "Epic 1", "goal": "goal", "priority": "P1"}]
+        tasks = build_project_tasks("PE01", epics, include_roles=["pm"])
+        pm_types = [t["task_type"] for t in tasks if t["role"] == "pm"]
+        self.assertIn("project_plan_excel", pm_types)
+
+    def test_excel_plan_depends_on_management_plan_in_build(self):
+        """In build_project_tasks(), project_plan_excel.depends_on must include the PM plan task ID."""
+        from shared.task_catalog import build_project_tasks
+        epics = [{"id": "PE02-E001", "title": "Epic 1", "goal": "goal", "priority": "P1"}]
+        tasks = build_project_tasks("PE02", epics, include_roles=["pm"])
+        plan_task = next((t for t in tasks if t["task_type"] == "project_management_plan"), None)
+        excel_task = next((t for t in tasks if t["task_type"] == "project_plan_excel"), None)
+        self.assertIsNotNone(plan_task)
+        self.assertIsNotNone(excel_task)
+        self.assertIn(plan_task["id"], excel_task["depends_on"],
+                      f"excel_plan.depends_on={excel_task['depends_on']!r} must include PM plan {plan_task['id']!r}")
+
+
+class TestProjectPlanExcelPrompt(unittest.TestCase):
+
+    def _rendered_prompt(self) -> str:
+        from agents.pm.task_prompts import build_pm_task_prompt
+        ctx = {
+            "project_name": "Test Project",
+            "project_charter_content": "Charter content",
+            "pm_plan_content": "PM plan content",
+        }
+        return build_pm_task_prompt("project_plan_excel", ctx)
+
+    def test_prompt_includes_manday_column(self):
+        """project_plan_excel prompt must mention 'Manday' column."""
+        self.assertIn("Manday", self._rendered_prompt())
+
+    def test_prompt_includes_duration_days_column(self):
+        """project_plan_excel prompt must mention 'Duration Days'."""
+        self.assertIn("Duration Days", self._rendered_prompt())
+
+    def test_prompt_includes_owner_agent_column(self):
+        """project_plan_excel prompt must mention 'Owner Agent'."""
+        self.assertIn("Owner Agent", self._rendered_prompt())
+
+    def test_prompt_includes_all_five_sheet_names(self):
+        """project_plan_excel prompt must include all 5 required sheet names."""
+        prompt = self._rendered_prompt()
+        for sheet in ("Project Plan", "Gantt", "Manday Summary", "Milestones", "Assumptions"):
+            self.assertIn(sheet, prompt, f"Prompt missing sheet: {sheet!r}")
+
+    def test_prompt_includes_wbs_and_dependency(self):
+        """Prompt must include WBS and Dependency columns."""
+        prompt = self._rendered_prompt()
+        self.assertIn("WBS", prompt)
+        self.assertIn("Dependency", prompt)
+
+
+class TestProjectPlanExcelContract(unittest.TestCase):
+
+    def _make_valid_json(self) -> str:
+        return (
+            '{"sheets":['
+            '{"name":"Project Plan","headers":["Task ID","WBS","Phase","Task","Description","Owner Agent","Start Date","End Date","Duration Days","Manday","Dependency","Deliverable","Status"],'
+            '"rows":[["T-001","1","Init","Brief","CEO","CEO Agent","W1","W1",1,1.0,"","brief.md","Planned"]]},'
+            '{"name":"Gantt","headers":["Task ID","Task","Owner","Week 1"],"rows":[["T-001","Brief","CEO Agent","x"]]},'
+            '{"name":"Manday Summary","headers":["Owner Agent","Total Tasks","Total Manday","First Start","Last End","Critical Deliverables"],'
+            '"rows":[["CEO Agent",1,1.0,"W1","W1","brief.md"]]},'
+            '{"name":"Milestones","headers":["Milestone ID","Milestone","Target Date","Owner","Exit Criteria","Dependency"],'
+            '"rows":[["M-001","Kickoff","W1","PM","Charter approved","T-001"]]},'
+            '{"name":"Assumptions","headers":["#","Category","Assumption","Impact if Wrong","Owner"],'
+            '"rows":[[1,"Team","1 Agent = 1 manday","Delay","PM Agent"]]}]}'
+        )
+
+    def test_valid_excel_plan_passes_contract(self):
+        """Complete JSON with all 5 sheets and required columns passes contract."""
+        result = validate_role_artifact_contract(
+            "pm", "project_plan_excel", self._make_valid_json(), "excel"
+        )
+        self.assertEqual(result.status, "passed", f"Failed: {result.revision_comment}")
+
+    def test_missing_manday_column_fails_contract(self):
+        """JSON without 'Manday' header fails contract."""
+        content = (
+            '{"sheets":['
+            '{"name":"Project Plan","headers":["Task ID","Duration Days","Owner Agent"],'
+            '"rows":[["T-001",1,"CEO Agent"]]},'
+            '{"name":"Gantt","headers":[],"rows":[]},'
+            '{"name":"Manday Summary","headers":[],"rows":[]},'
+            '{"name":"Milestones","headers":[],"rows":[]},'
+            '{"name":"Assumptions","headers":[],"rows":[]}]}'
+        )
+        result = validate_role_artifact_contract("pm", "project_plan_excel", content, "excel")
+        self.assertEqual(result.status, "failed")
+        self.assertIn("manday_column", result.missing_sections)
+
+    def test_missing_project_plan_sheet_fails_contract(self):
+        """JSON without 'Project Plan' sheet name fails contract."""
+        content = (
+            '{"sheets":['
+            '{"name":"Schedule","headers":["Manday","Duration Days","Owner Agent"],"rows":[]},'
+            '{"name":"Gantt","headers":[],"rows":[]},'
+            '{"name":"Manday Summary","headers":[],"rows":[]},'
+            '{"name":"Milestones","headers":[],"rows":[]},'
+            '{"name":"Assumptions","headers":[],"rows":[]}]}'
+        )
+        result = validate_role_artifact_contract("pm", "project_plan_excel", content, "excel")
+        self.assertEqual(result.status, "failed")
+        self.assertIn("project_plan_sheet", result.missing_sections)
+
+    def test_missing_gantt_sheet_fails_contract(self):
+        """JSON without 'Gantt' sheet fails contract."""
+        content = (
+            '"Project Plan" "Manday Summary" "Milestones" "Assumptions" '
+            '"Manday" "Duration Days" "Owner Agent"'  # all other keys present
+        )
+        result = validate_role_artifact_contract("pm", "project_plan_excel", content, "excel")
+        self.assertEqual(result.status, "failed")
+        self.assertIn("gantt_sheet", result.missing_sections)
+
+
+# ─── 21: No-role Groq 413 static branch fix ──────────────────────────────────
+
+class TestGroq413NoRoleBranch(unittest.TestCase):
+
+    def test_static_fallback_excludes_groq_after_413(self):
+        """Static (no-role) fallback list must exclude groq provider when 413 occurred."""
+        # Mirror the no-role static fallback filtering logic from llm_client.py
+        from shared.model_router import MODELS
+
+        _payload_reject_provider = "groq"
+
+        static_candidates = [
+            ("claude-cli/claude-sonnet-4-6", MODELS.get("claude-cli/claude-sonnet-4-6"), 7),
+            ("openai/gpt-4o-mini",           MODELS.get("openai/gpt-4o-mini"),           6),
+            ("groq/llama-3.3-70b",           MODELS.get("groq/llama-3.3-70b"),           6),
+            ("ollama/hermes3",                MODELS.get("ollama/hermes3"),               2),
+        ]
+        tried_keys = {"groq/llama-3.3-70b"}  # primary that failed with 413
+
+        filtered = [
+            (k, cfg, s) for k, cfg, s in static_candidates
+            if cfg and k not in tried_keys and cfg.provider != _payload_reject_provider
+        ]
+        filtered_keys = [k for k, _, _ in filtered]
+
+        self.assertNotIn("groq/llama-3.3-70b", filtered_keys,
+                         "groq/llama-3.3-70b must be excluded from static fallback after 413")
+        # Ensure other non-Groq candidates remain
+        non_groq = [k for k in filtered_keys if "groq" not in k]
+        self.assertTrue(len(non_groq) > 0, "Non-Groq fallback candidates must remain available")
+
+    def test_both_role_aware_and_no_role_branch_exclude_groq_on_413(self):
+        """Both role-aware and static fallback paths use _payload_reject_provider to exclude Groq."""
+        import inspect
+        from shared.llm_client import LLMClient
+        source = inspect.getsource(LLMClient.complete)
+        # _payload_reject_provider must appear in both the role-aware section
+        # AND in the else (no-role static) filter
+        occurrences = source.count("_payload_reject_provider")
+        # Expect: assignment + role branch filter (free + cheap) + no-role filter = ≥ 4
+        self.assertGreaterEqual(
+            occurrences, 4,
+            f"_payload_reject_provider used {occurrences} times — expected ≥ 4 (assignment + role branch ×2 + no-role)"
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

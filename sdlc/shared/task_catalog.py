@@ -48,11 +48,19 @@ TASK_CATALOG: Dict[str, List[dict]] = {
             "scope": "project",
         },
         {
+            "task_type": "project_plan_excel",
+            "title": "Excel Project Plan (MS-Project style)",
+            "output_file": "project_plan.xlsx",
+            "output_format": "excel",
+            "depends_on_types": ["project_management_plan"],
+            "scope": "project",
+        },
+        {
             "task_type": "raci_matrix",
             "title": "RACI Matrix",
             "output_file": "raci_matrix.xlsx",
             "output_format": "excel",
-            "depends_on_types": ["project_charter"],
+            "depends_on_types": ["project_management_plan"],
             "scope": "project",
         },
         {
@@ -60,7 +68,7 @@ TASK_CATALOG: Dict[str, List[dict]] = {
             "title": "Risk Register",
             "output_file": "risk_register.docx",
             "output_format": "word",
-            "depends_on_types": ["project_charter"],
+            "depends_on_types": ["project_management_plan"],
             "scope": "project",
         },
         {
@@ -68,7 +76,7 @@ TASK_CATALOG: Dict[str, List[dict]] = {
             "title": "Communications Management Plan",
             "output_file": "communications_plan.docx",
             "output_format": "word",
-            "depends_on_types": ["project_charter"],
+            "depends_on_types": ["project_management_plan"],
             "scope": "project",
         },
         {
@@ -76,7 +84,7 @@ TASK_CATALOG: Dict[str, List[dict]] = {
             "title": "Project Status Report",
             "output_file": "project_status_report.docx",
             "output_format": "word",
-            "depends_on_types": ["project_management_plan"],
+            "depends_on_types": ["communications_plan", "risk_register"],
             "scope": "project",
         },
     ],

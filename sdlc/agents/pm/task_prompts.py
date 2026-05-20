@@ -167,6 +167,136 @@ PROMPTS = {
 เขียนเนื้อหาให้ครบถ้วนทุกหัวข้อ — ทดแทน placeholder ทั้งหมดด้วยเนื้อหาจริงที่เกี่ยวข้องกับโปรเจคนี้โดยตรง ห้ามใส่ "..." หรือข้อความทั่วไปที่ไม่เกี่ยวข้อง
 """,
 
+    "project_plan_excel": """
+คุณเป็น PM Agent
+
+## Project Charter:
+{project_charter_content}
+
+## แผนบริหารโครงการ (Project Management Plan):
+{pm_plan_content}
+
+## สิ่งที่ต้องส่งมอบ: project_plan.xlsx
+สร้าง **Excel Project Plan** สไตล์ MS Project ตอบด้วย **JSON เท่านั้น** ตามรูปแบบด้านล่าง
+
+**ข้อบังคับ:**
+- Duration Days และ Manday ต้องเป็นตัวเลข (float) ห้ามว่าง ห้ามใส่ "-" หรือ "TBD"
+- Phase manday = ผลรวม child tasks ของ phase นั้น
+- ใส่ทุก Agent role อย่างน้อย 1 task: CEO, PM, BA, SA, UXUI, DEV, QA, DevOps
+- Dependency ให้อ้างอิง Task ID ที่มีอยู่จริง เช่น "T-001" ห้ามว่างสำหรับ task ที่มี upstream
+
+{{
+  "sheets": [
+    {{
+      "name": "Project Plan",
+      "headers": ["Task ID","WBS","Phase","Task","Description","Owner Agent","Start Date","End Date","Duration Days","Manday","Dependency","Deliverable","Status"],
+      "rows": [
+        ["T-001","1","Initiation","Project Brief & Approval","CEO กำหนดทิศทางโครงการ","CEO Agent","สัปดาห์ที่ 1","สัปดาห์ที่ 1",1,1.0,"","project_brief.md","Planned"],
+        ["T-002","1.1","Initiation","Epics Definition","แบ่ง Epic ทั้งหมด","CEO Agent","สัปดาห์ที่ 1","สัปดาห์ที่ 1",1,1.0,"T-001","epics.md","Planned"],
+        ["T-003","2","Planning","Project Charter","กำหนดขอบเขต วัตถุประสงค์","PM Agent","สัปดาห์ที่ 1","สัปดาห์ที่ 1",1,1.0,"T-002","project_charter.docx","Planned"],
+        ["T-004","2.1","Planning","Project Management Plan","แผนบริหารโครงการครบถ้วน","PM Agent","สัปดาห์ที่ 1","สัปดาห์ที่ 2",2,2.0,"T-003","project_management_plan.docx","Planned"],
+        ["T-005","2.2","Planning","Excel Project Plan","MS-Project style schedule","PM Agent","สัปดาห์ที่ 2","สัปดาห์ที่ 2",1,0.5,"T-004","project_plan.xlsx","Planned"],
+        ["T-006","3","Analysis","BRD","Business Requirements Document","BA Agent","สัปดาห์ที่ 2","สัปดาห์ที่ 2",2,2.0,"T-003","BRD.docx","Planned"],
+        ["T-007","3.1","Analysis","SRS","Software Requirements Spec","BA Agent","สัปดาห์ที่ 2","สัปดาห์ที่ 3",2,2.0,"T-006","SRS.docx","Planned"],
+        ["T-008","3.2","Analysis","User Stories","User Stories + Acceptance Criteria","BA Agent","สัปดาห์ที่ 3","สัปดาห์ที่ 3",1,1.0,"T-006","user_stories.xlsx","Planned"],
+        ["T-009","4","Architecture","System Architecture","Architecture Diagram","SA Agent","สัปดาห์ที่ 2","สัปดาห์ที่ 3",2,2.0,"T-007","architecture_diagram.mmd","Planned"],
+        ["T-010","4.1","Architecture","API Specification","OpenAPI YAML","SA Agent","สัปดาห์ที่ 3","สัปดาห์ที่ 3",2,2.0,"T-009","api_spec.yaml","Planned"],
+        ["T-011","5","Design","User Flow","User Flow Diagram","UXUI Agent","สัปดาห์ที่ 3","สัปดาห์ที่ 3",1,1.0,"T-010","user_flow.mmd","Planned"],
+        ["T-012","5.1","Design","Wireframe","HTML Wireframe","UXUI Agent","สัปดาห์ที่ 3","สัปดาห์ที่ 4",1,1.5,"T-011","wireframe.html","Planned"],
+        ["T-013","5.2","Design","Design System","Color, Typography, Components","UXUI Agent","สัปดาห์ที่ 4","สัปดาห์ที่ 4",1,1.0,"T-012","design_system.md","Planned"],
+        ["T-014","6","Development","Frontend Structure","Tech stack, folder structure","DEV Agent","สัปดาห์ที่ 3","สัปดาห์ที่ 4",2,2.0,"T-012","frontend_structure.docx","Planned"],
+        ["T-015","6.1","Development","Backend Structure","API design, service layout","DEV Agent","สัปดาห์ที่ 3","สัปดาห์ที่ 4",2,2.0,"T-010","backend_structure.docx","Planned"],
+        ["T-016","6.2","Development","Frontend Code","Implementation","DEV Agent","สัปดาห์ที่ 4","สัปดาห์ที่ 5",3,3.0,"T-014","frontend_code/","Planned"],
+        ["T-017","6.3","Development","Backend Code","API + business logic","DEV Agent","สัปดาห์ที่ 4","สัปดาห์ที่ 5",3,3.0,"T-015","backend_code/","Planned"],
+        ["T-018","6.4","Development","Unit Tests","Automated unit tests","DEV Agent","สัปดาห์ที่ 5","สัปดาห์ที่ 5",1,1.0,"T-016,T-017","unit_tests/","Planned"],
+        ["T-019","7","QA","QA Plan","Test strategy + scope","QA Agent","สัปดาห์ที่ 5","สัปดาห์ที่ 5",1,1.0,"T-018","qa_plan.docx","Planned"],
+        ["T-020","7.1","QA","Test Cases","TC-NNN test cases","QA Agent","สัปดาห์ที่ 5","สัปดาห์ที่ 6",2,2.0,"T-008,T-019","test_cases.xlsx","Planned"],
+        ["T-021","7.2","QA","Test Report","Execution result + defects","QA Agent","สัปดาห์ที่ 6","สัปดาห์ที่ 6",1,1.5,"T-020","test_report.docx","Planned"],
+        ["T-022","8","Deployment","Dockerfile + Compose","Container build config","DevOps Agent","สัปดาห์ที่ 5","สัปดาห์ที่ 6",2,1.5,"T-018","Dockerfile","Planned"],
+        ["T-023","8.1","Deployment","CI/CD Pipeline","GitHub Actions workflow","DevOps Agent","สัปดาห์ที่ 6","สัปดาห์ที่ 6",1,1.0,"T-022","ci.yml","Planned"],
+        ["T-024","8.2","Deployment","Deployment Guide","Runbook + ENV setup","DevOps Agent","สัปดาห์ที่ 6","สัปดาห์ที่ 6",1,1.0,"T-023","deployment_guide.docx","Planned"]
+      ]
+    }},
+    {{
+      "name": "Gantt",
+      "headers": ["Task ID","Task","Owner","Week 1","Week 2","Week 3","Week 4","Week 5","Week 6"],
+      "rows": [
+        ["T-001","Project Brief","CEO Agent","x","","","","",""],
+        ["T-002","Epics Definition","CEO Agent","x","","","","",""],
+        ["T-003","Project Charter","PM Agent","x","","","","",""],
+        ["T-004","Project Management Plan","PM Agent","x","x","","","",""],
+        ["T-005","Excel Project Plan","PM Agent","","x","","","",""],
+        ["T-006","BRD","BA Agent","","x","","","",""],
+        ["T-007","SRS","BA Agent","","x","x","","",""],
+        ["T-008","User Stories","BA Agent","","","x","","",""],
+        ["T-009","Architecture","SA Agent","","x","x","","",""],
+        ["T-010","API Spec","SA Agent","","","x","","",""],
+        ["T-011","User Flow","UXUI Agent","","","x","","",""],
+        ["T-012","Wireframe","UXUI Agent","","","x","x","",""],
+        ["T-013","Design System","UXUI Agent","","","","x","",""],
+        ["T-014","Frontend Structure","DEV Agent","","","x","x","",""],
+        ["T-015","Backend Structure","DEV Agent","","","x","x","",""],
+        ["T-016","Frontend Code","DEV Agent","","","","x","x",""],
+        ["T-017","Backend Code","DEV Agent","","","","x","x",""],
+        ["T-018","Unit Tests","DEV Agent","","","","","x",""],
+        ["T-019","QA Plan","QA Agent","","","","","x",""],
+        ["T-020","Test Cases","QA Agent","","","","","x","x"],
+        ["T-021","Test Report","QA Agent","","","","","","x"],
+        ["T-022","Dockerfile + Compose","DevOps Agent","","","","","x","x"],
+        ["T-023","CI/CD Pipeline","DevOps Agent","","","","","","x"],
+        ["T-024","Deployment Guide","DevOps Agent","","","","","","x"]
+      ]
+    }},
+    {{
+      "name": "Manday Summary",
+      "headers": ["Owner Agent","Total Tasks","Total Manday","First Start","Last End","Critical Deliverables"],
+      "rows": [
+        ["CEO Agent",2,2.0,"สัปดาห์ที่ 1","สัปดาห์ที่ 1","project_brief.md, epics.md"],
+        ["PM Agent",3,3.5,"สัปดาห์ที่ 1","สัปดาห์ที่ 2","project_charter.docx, project_plan.xlsx"],
+        ["BA Agent",3,5.0,"สัปดาห์ที่ 2","สัปดาห์ที่ 3","BRD.docx, SRS.docx, user_stories.xlsx"],
+        ["SA Agent",2,4.0,"สัปดาห์ที่ 2","สัปดาห์ที่ 3","architecture_diagram.mmd, api_spec.yaml"],
+        ["UXUI Agent",3,3.5,"สัปดาห์ที่ 3","สัปดาห์ที่ 4","wireframe.html, design_system.md"],
+        ["DEV Agent",5,10.0,"สัปดาห์ที่ 3","สัปดาห์ที่ 5","frontend_code/, backend_code/, unit_tests/"],
+        ["QA Agent",3,4.5,"สัปดาห์ที่ 5","สัปดาห์ที่ 6","test_cases.xlsx, test_report.docx"],
+        ["DevOps Agent",3,3.5,"สัปดาห์ที่ 5","สัปดาห์ที่ 6","Dockerfile, ci.yml, deployment_guide.docx"],
+        ["TOTAL","24",36.0,"สัปดาห์ที่ 1","สัปดาห์ที่ 6","Full SDLC Delivery"]
+      ]
+    }},
+    {{
+      "name": "Milestones",
+      "headers": ["Milestone ID","Milestone","Target Date","Owner","Exit Criteria","Dependency"],
+      "rows": [
+        ["M-001","Project Kickoff Complete","สัปดาห์ที่ 1","PM Agent","Project Charter approved","T-003"],
+        ["M-002","Requirements Frozen","สัปดาห์ที่ 3","BA Agent","BRD + SRS + User Stories approved","-"],
+        ["M-003","Architecture Approved","สัปดาห์ที่ 3","SA Agent","Architecture + API Spec approved","M-002"],
+        ["M-004","Design Complete","สัปดาห์ที่ 4","UXUI Agent","Wireframe + Design System approved","M-003"],
+        ["M-005","Development Complete","สัปดาห์ที่ 5","DEV Agent","Frontend + Backend + Unit Tests pass","M-004"],
+        ["M-006","QA Pass","สัปดาห์ที่ 6","QA Agent","Test Report: 0 Critical Defects","M-005"],
+        ["M-007","Deployment Ready","สัปดาห์ที่ 6","DevOps Agent","Deployment Guide + CI/CD verified","M-006"],
+        ["M-008","Project Complete / UAT Signed Off","สัปดาห์ที่ 6","PM Agent","CEO/Human approval received","M-007"]
+      ]
+    }},
+    {{
+      "name": "Assumptions",
+      "headers": ["#","Category","Assumption","Impact if Wrong","Owner"],
+      "rows": [
+        [1,"Team","1 Agent = 1.0 manday per task day","Delivery delayed","PM Agent"],
+        [2,"Calendar","6-week timeline, 5 working days/week","Milestone slippage","PM Agent"],
+        [3,"Infrastructure","Ollama local deployment available","LLM fallback to Groq/Claude CLI","DevOps Agent"],
+        [4,"Safety","PAPER_TRADING_MODE=true always enabled","Real exchange orders executed (critical)","DEV Agent"],
+        [5,"Safety","No real API key/secret stored in codebase","API secret leakage (critical)","DEV Agent"],
+        [6,"Safety","All trades are paper/simulated fills only","Real financial loss (critical)","QA Agent"],
+        [7,"Quality","Model fallback to local models may reduce output quality","Contract validation failures","PM Agent"],
+        [8,"Dependency","BA depends on PM Charter before starting BRD","Rework if started in parallel","BA Agent"]
+      ]
+    }}
+  ]
+}}
+
+**ข้อบังคับ:** แทนที่เนื้อหาทั้งหมดด้วยข้อมูลจริงของโปรเจค {project_name} — ห้าม placeholder ห้าม TBD ห้าม "..."
+ให้ตรวจสอบ manday ใน Manday Summary ตรงกับผลรวม tasks ใน Project Plan เสมอ
+""",
+
     "raci_matrix": """
 คุณเป็น PM Agent
 

@@ -160,15 +160,17 @@ class LLMClient:
                 cheap_candidates.sort(key=lambda x: x[2], reverse=True)
                 ranked_fallbacks = free_candidates + cheap_candidates
             else:
-                # Static fallback when role is unknown
+                # Static fallback when role is unknown — also exclude 413 provider
                 ranked_fallbacks = [
                     ("claude-cli/claude-sonnet-4-6", MODELS.get("claude-cli/claude-sonnet-4-6"), 7),
                     ("openai/gpt-4o-mini",           MODELS.get("openai/gpt-4o-mini"),           6),
                     ("groq/llama-3.3-70b",           MODELS.get("groq/llama-3.3-70b"),           6),
                     ("ollama/hermes3",                MODELS.get("ollama/hermes3"),               2),
                 ]
-                ranked_fallbacks = [(k, cfg, s) for k, cfg, s in ranked_fallbacks
-                                    if cfg and k not in tried_keys]
+                ranked_fallbacks = [
+                    (k, cfg, s) for k, cfg, s in ranked_fallbacks
+                    if cfg and k not in tried_keys and cfg.provider != _payload_reject_provider
+                ]
 
             for fb_key, fb_cfg, fb_score in ranked_fallbacks:
                 if not fb_cfg:
