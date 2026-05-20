@@ -166,4 +166,38 @@
       TestCEOProjectNameExtraction × 4 (clean name from attachment/command prefix)
       TestStageGates × 6 (cross-role deps, build_project_tasks resolution, preferred_model)
 
+  Hotfix: bi-directional SDLC approvals
+    Problems fixed:
+      1. Approval card was posted to #{role}-output (not #{role}-approve)
+      2. Discord embed said only !revise / !reject, not !approve
+      3. Web decision notifications used DISCORD_APPROVAL_CHANNEL_ID env var
+         (single global channel) instead of role-specific #{role}-approve
+    Changes — sdlc/shared/base_agent.py:
+      _execute_sdlc_task(): approve_ch now fetched alongside output_ch and tlog_ch
+      Completion block restructured:
+        output_ch: brief summary ("Awaiting approval in #pm-approve")
+        approve_ch (manual mode): explicit approval card embed with:
+          Task ID, Type, Model, Duration, Artifact download link
+          Description: "Reply to this message with: !approve / !revise / !reject"
+          approval_msg_id stored from approve_ch message (not output_ch)
+        Auto-approve path uses already-resolved approve_ch (no redundant re-fetch)
+      _execute_web_decision(): replaced os.getenv("DISCORD_APPROVAL_CHANNEL_ID")
+        with role-specific ROLE_CHANNELS.get(role_name).approve lookup
+    Tests:
+      sdlc/tests/test_hotfix_approvals.py: 9 tests — all green
+        TestApprovalChannelRouting × 3 (manual posts to approve ch, approval_msg_id
+          from approve ch, auto-mode does not set approval_msg_id)
+        TestDiscordApproveSync × 2 (!approve updates sdlc.db, calls bridge with sdlc_task_id)
+        TestWebDecisionRoleChannel × 2 (web decision notifies role-specific channel,
+          no reliance on DISCORD_APPROVAL_CHANNEL_ID env var)
+        TestContractFailedNoApproval × 1 (status="blocked" → no approval_item)
+        TestApproveChannelNames × 1 (every role has #{role}-approve channel)
+      webapp/tests/approval-bidirectional.test.ts: 6 tests — all green
+        approval_item stores discord_message_id from approve channel
+        !approve ingest syncs to approval_item by sdlc_task_id
+        revision_requested event updates approval_item to rework_requested
+        web UI approve → item appears in decisions endpoint with discord_message_id
+        blocked status does not create approval_item
+        validation-failed (blocked) items absent from decisions endpoint
+
   Next: Phase 10 TBD

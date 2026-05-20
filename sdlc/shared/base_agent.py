@@ -1249,8 +1249,9 @@ class BaseAgent(ABC):
             return
         guild = guilds[0]
 
-        approval_ch_id = os.getenv("DISCORD_APPROVAL_CHANNEL_ID")
-        approval_ch = guild.get_channel(int(approval_ch_id)) if approval_ch_id else None
+        # Use the role-specific #{role}-approve channel for web decision notifications
+        _role_ch_web = ROLE_CHANNELS.get(self.role_name)
+        approval_ch = await get_guild_channel(guild, _role_ch_web.approve) if _role_ch_web else None
 
         # ─── Prefer sdlc_task_id lookup (exact identity, status-guarded) ─────
         # Falls back to title lookup (legacy items that predate identity fields)
@@ -1505,9 +1506,10 @@ class BaseAgent(ABC):
         """Execute 1 sdlc_task → 1 file output"""
         from shared.channel_config import ROLE_CHANNELS, get_guild_channel
 
-        role_ch   = ROLE_CHANNELS.get(self.role_name)
-        output_ch = await get_guild_channel(guild, role_ch.output)  if role_ch else None
-        tlog_ch   = await get_guild_channel(guild, role_ch.timelog) if role_ch else None
+        role_ch    = ROLE_CHANNELS.get(self.role_name)
+        output_ch  = await get_guild_channel(guild, role_ch.output)  if role_ch else None
+        approve_ch = await get_guild_channel(guild, role_ch.approve) if role_ch else None
+        tlog_ch    = await get_guild_channel(guild, role_ch.timelog) if role_ch else None
 
         # Status is already 'in_progress' — set by claim_sdlc_task() before entering here
         log_id = f"{self.role_name}-{task.id}"
@@ -1762,41 +1764,68 @@ class BaseAgent(ABC):
         except Exception as _hook_err:
             logger.warning(f"[{self.role_name}] post-task hook error: {_hook_err}")
 
-        # ─── Post to output channel + store msg_id for G2 approval ──
-        _discord_msg_id = ""
+        # ─── Build shared download URL ────────────────────────────────
+        import urllib.parse as _up
+        tier_emoji = {"free": "🆓", "cheap": "💰", "smart": "🧠"}.get(routing["tier"], "")
+        _web_url = os.getenv("WEB_APP_URL", "http://localhost:3001")
+        _rel_file = f"{task.epic_id}/{self.role_name}/{task.output_file}"
+        _dl_url = (
+            f"{_web_url}/api/project-logs/files/download"
+            f"?project={_up.quote(task.project_id)}"
+            f"&file={_up.quote(_rel_file)}"
+        )
+
+        # ─── Output channel: completion summary (visible to all) ─────
         if output_ch:
-            import urllib.parse as _up
-            tier_emoji = {"free": "🆓", "cheap": "💰", "smart": "🧠"}.get(routing["tier"], "")
-            # Build download URL: file is relative to OUTPUT_BASE/projects/{project_id}/
-            _web_url = os.getenv("WEB_APP_URL", "http://localhost:3001")
-            _rel_file = f"{task.epic_id}/{self.role_name}/{task.output_file}"
-            _dl_url = (
-                f"{_web_url}/api/project-logs/files/download"
-                f"?project={_up.quote(task.project_id)}"
-                f"&file={_up.quote(_rel_file)}"
-            )
-            embed = discord.Embed(
+            out_embed = discord.Embed(
                 title=f"✅ {task.task_type} — {task.id}",
                 color=0x24e08a,
             )
-            embed.add_field(name="Epic", value=f"`{task.epic_id}`", inline=True)
-            embed.add_field(name="Model", value=f"`{_actual_model}` {tier_emoji}", inline=True)
-            embed.add_field(name="Duration", value=f"{round(_duration)}s", inline=True)
-            embed.add_field(
+            out_embed.add_field(name="Epic", value=f"`{task.epic_id}`", inline=True)
+            out_embed.add_field(name="Model", value=f"`{_actual_model}` {tier_emoji}", inline=True)
+            out_embed.add_field(name="Duration", value=f"{round(_duration)}s", inline=True)
+            out_embed.add_field(
                 name="Output file",
                 value=f"`{task.output_file}`\n[⬇ Download]({_dl_url})",
                 inline=False,
             )
             if task.revision_count > 0:
-                embed.set_footer(text=f"Revision #{task.revision_count}")
-            embed.description = (
-                "> Reply `!revise <note>` to request changes\n"
-                "> Reply `!reject <reason>` to reject\n"
-                "> React or use `!sdlc_status` to see all tasks"
+                out_embed.set_footer(text=f"Revision #{task.revision_count}")
+            if _approval_mode == "manual":
+                _approve_ch_name = role_ch.approve if role_ch else "approve"
+                out_embed.description = f"⏳ Awaiting approval in `#{_approve_ch_name}`"
+            await output_ch.send(embed=out_embed)
+
+        # ─── Approve channel: explicit approval card (manual mode) ───
+        # The approval card is posted to #{role}-approve so operators reply
+        # !approve / !revise / !reject to THIS message — approval_msg_id
+        # tracks this message so the bot can resolve the task on reply.
+        _discord_msg_id = ""
+        if _approval_mode == "manual" and approve_ch:
+            approve_embed = discord.Embed(
+                title=f"📋 Approval Required — {task.task_type}",
+                description=(
+                    "**Reply to this message with:**\n"
+                    "> `!approve`\n"
+                    "> `!revise <note>`\n"
+                    "> `!reject <reason>`"
+                ),
+                color=0xFFD700,
             )
-            msg = await output_ch.send(embed=embed)
-            _discord_msg_id = str(msg.id)
-            # G2: store message ID so !revise / !reject replies can find this task
+            approve_embed.add_field(name="Task ID", value=f"`{task.id}`", inline=True)
+            approve_embed.add_field(name="Type", value=f"`{task.task_type}`", inline=True)
+            approve_embed.add_field(name="Model", value=f"`{_actual_model}` {tier_emoji}", inline=True)
+            approve_embed.add_field(name="Duration", value=f"{round(_duration)}s", inline=True)
+            approve_embed.add_field(
+                name="Artifact",
+                value=f"`{task.output_file}`\n[⬇ Download]({_dl_url})",
+                inline=False,
+            )
+            if task.revision_count > 0:
+                approve_embed.set_footer(text=f"Revision #{task.revision_count}")
+            approve_msg = await approve_ch.send(embed=approve_embed)
+            _discord_msg_id = str(approve_msg.id)
+            # G2: store approve-channel message ID so !approve / !revise / !reject can find task
             self.storage.set_sdlc_task_approval_msg(task.id, _discord_msg_id)
 
         # ─── G1: Web bridge — task completed ────────────────────────
@@ -1834,7 +1863,6 @@ class BaseAgent(ABC):
         # ─── Auto-approve mode ────────────────────────────────────────
         if _approval_mode == "auto":
             # Notify approve channel (for audit trail) then auto-approve via web bridge
-            approve_ch = await get_guild_channel(guild, role_ch.approve) if role_ch else None
             if approve_ch:
                 await approve_ch.send(
                     f"✅ **Auto-approved** (approval:auto mode)\n"
