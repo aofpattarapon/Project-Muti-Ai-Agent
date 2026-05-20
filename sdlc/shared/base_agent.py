@@ -2003,7 +2003,13 @@ class BaseAgent(ABC):
         project = self.storage.get_project(task.project_id)
         if project:
             ctx["project_brief"] = project.description or ""
-            ctx["requirements"] = project.description or ""
+            # Prefer full requirements from input_data (stored at task creation); fall back
+            # to project.description which is truncated to 500 chars.
+            ctx["requirements"] = (
+                input_data.get("requirements")
+                or project.description
+                or ""
+            )
 
         # Load outputs of dependency tasks
         if task.depends_on:

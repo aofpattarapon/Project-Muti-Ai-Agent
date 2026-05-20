@@ -136,4 +136,34 @@
     sdlc/tests/test_attachment_intake.py: 24 tests — all green
     Image (PNG/JPG) and PDF support deferred to a future phase (OCR/vision dependency)
 
+  Hotfix: preserve full CEO requirements + SDLC stage gates
+    sdlc/shared/base_agent.py — _build_sdlc_context():
+      ctx["requirements"] now prefers input_data["requirements"] (full text, never truncated)
+      Falls back to project.description (500-char truncation) only when input_data lacks key.
+    sdlc/agents/ceo/agent.py:
+      _on_sdlc_task_completed (epics): injects full requirements into every downstream task's
+        input_data["requirements"] so BA/SA/UXUI/DEV prompts receive the full text.
+      _start_project_from_text(): project_name parser strips "## Attachment:" headers and
+        "!<command>" Discord prefixes before splitting on "|" or "name:" key.
+    sdlc/shared/task_catalog.py:
+      TASK_CATALOG["ceo"]: both project_brief and epics get preferred_model =
+        "claude-cli/claude-sonnet-4-6"
+      TASK_CATALOG["uxui"]["design_system"]: depends_on_types changed [] → ["user_flow"]
+        so design_system waits for user_flow (was starting immediately)
+      CROSS_ROLE_DEPS: added "ba": {"brd": "pm:project_charter"} — BA now waits for PM
+      resolve_deps(): fallback to project_epic_id for cross-scope deps
+        (epic-level BA depending on project-level PM)
+    Stage gate order (complete):
+      CEO epics → [all tasks created] → PM project_charter → BA brd → BA ... → BA data_dictionary
+      → SA system_purpose → ... → SA api_spec → UXUI user_flow → UXUI wireframe → UXUI design_system
+      DEV frontend_structure (from UXUI wireframe) | DEV backend_structure (from SA api_spec)
+      → DEV unit_tests → DEV dev_readme → QA qa_plan → ...
+    sdlc/agents/ceo/prompts.py: CEO Golden Rules 9-11 added:
+      Preserve explicit user constraints (timeline, budget, team size) exactly as stated.
+      Do not invent numbers; mark invented values as [Assumption] or TBD.
+    sdlc/tests/test_hotfix_requirements.py: 14 tests — all green
+      TestBuildSdlcContextRequirements × 4 (requirements preservation + fallback)
+      TestCEOProjectNameExtraction × 4 (clean name from attachment/command prefix)
+      TestStageGates × 6 (cross-role deps, build_project_tasks resolution, preferred_model)
+
   Next: Phase 10 TBD

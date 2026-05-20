@@ -133,15 +133,23 @@ class CEOAgent(BaseAgent):
         if _approval_match:
             requirements_text = _re.sub(r'approval\s*:\s*(auto|manual)\s*', '', requirements_text, flags=_re.I).strip()
 
-        # Parse project name — support "Name | description" pipe format first
+        # Parse project name — strip attachment headers and Discord command prefixes first,
+        # then look for "Name | description" pipe format or "project name:" key.
+        _CMD_PREFIX = re.compile(r'^![\w]+\s*', re.IGNORECASE)
         project_name = "Project"
-        if "|" in requirements_text:
-            project_name = requirements_text.split("|")[0].strip()
-        else:
-            for line in requirements_text.split("\n"):
-                if "project name:" in line.lower() or "name:" in line.lower():
-                    project_name = line.split(":", 1)[1].strip()
-                    break
+        for _line in requirements_text.split("\n"):
+            _line = _line.strip()
+            if not _line or _line.startswith("## Attachment:") or _line.startswith("### "):
+                continue
+            _line = _CMD_PREFIX.sub("", _line).strip()
+            if not _line:
+                continue
+            if "|" in _line:
+                project_name = _line.split("|")[0].strip() or "Project"
+                break
+            if "project name:" in _line.lower() or "name:" in _line.lower():
+                project_name = _line.split(":", 1)[1].strip() or "Project"
+                break
 
         # สร้าง Project
         project_id = str(uuid.uuid4())[:8].upper()
@@ -266,6 +274,9 @@ class CEOAgent(BaseAgent):
             brief_task = self._get_completed_ceo_task(task.project_id, "project_brief")
             brief_content = brief_task.output_data if brief_task else ""
             today = date.today().strftime("%d/%m/%Y")
+            # Pull full requirements from CEO task input_data (never truncated)
+            _ceo_inp = json.loads(task.input_data or "{}")
+            full_requirements = _ceo_inp.get("requirements", "")
 
             created = 0
             for tdef in all_tasks:
@@ -275,6 +286,7 @@ class CEOAgent(BaseAgent):
                     inp["epics_content"] = content
                     inp["project_name"] = project_name
                     inp["today"] = today
+                    inp["requirements"] = full_requirements
                     tdef["input_data"] = json.dumps(inp)
                     self.storage.create_sdlc_task(SdlcTask(**tdef))
                     created += 1

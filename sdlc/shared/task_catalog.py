@@ -18,6 +18,7 @@ TASK_CATALOG: Dict[str, List[dict]] = {
             "output_format": "markdown",
             "depends_on_types": [],
             "scope": "project",
+            "preferred_model": "claude-cli/claude-sonnet-4-6",
         },
         {
             "task_type": "epics",
@@ -26,6 +27,7 @@ TASK_CATALOG: Dict[str, List[dict]] = {
             "output_format": "markdown",
             "depends_on_types": ["project_brief"],
             "scope": "project",
+            "preferred_model": "claude-cli/claude-sonnet-4-6",
         },
     ],
     "pm": [
@@ -236,7 +238,7 @@ TASK_CATALOG: Dict[str, List[dict]] = {
             "title": "Design System",
             "output_file": "design_system.docx",
             "output_format": "word",
-            "depends_on_types": [],
+            "depends_on_types": ["user_flow"],
             "scope": "epic",
         },
         {
@@ -393,6 +395,7 @@ TASK_CATALOG: Dict[str, List[dict]] = {
 # DevOps รอ QA test_report (project-level)
 CROSS_ROLE_DEPS: Dict[str, Dict[str, str]] = {
     # role → {task_type: depends_on_role:task_type}
+    "ba":   {"brd":                 "pm:project_charter"},
     "sa":   {"system_purpose":      "ba:data_dictionary"},
     "uxui": {"user_flow":           "sa:api_spec"},
     "dev":  {"frontend_structure":  "uxui:wireframe",
@@ -441,14 +444,20 @@ def build_project_tasks(
             if key in type_to_id:
                 dep_ids.append(type_to_id[key])
 
-        # Cross-role deps
+        # Cross-role deps — try same-epic scope first, fall back to project scope
+        # (needed when an epic-level role depends on a project-level role, e.g. ba→pm)
         cross = CROSS_ROLE_DEPS.get(role, {})
         if task_type in cross:
-            cross_ref = cross[task_type]  # e.g. "sa:api_spec"
+            cross_ref = cross[task_type]  # e.g. "sa:api_spec" or "pm:project_charter"
             cross_role, cross_type = cross_ref.split(":")
             key = f"{epic_id}:{cross_role}:{cross_type}"
             if key in type_to_id:
                 dep_ids.append(type_to_id[key])
+            else:
+                # project-level dep (e.g. ba→pm where pm uses project_epic_id)
+                key = f"{project_epic_id}:{cross_role}:{cross_type}"
+                if key in type_to_id:
+                    dep_ids.append(type_to_id[key])
 
         return ",".join(dep_ids)
 
