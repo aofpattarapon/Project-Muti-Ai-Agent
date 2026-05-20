@@ -19,7 +19,9 @@
   - scripts/start_pm2.sh: --no-cron still starts sdlc-quota-recovery (runtime safety, not cron)
 
   Next phase:
-  - Phase 9: TBD (decide with user)
+  - Phase 9: Runtime Observability & Operator Control Plane
+  - Roadmap: docs/PHASE9_ROADMAP.md (design locked, ready for 9.1 implementation)
+  - Sub-phases: 9.1 Backend APIs → 9.2 Recovery Dashboard UI → 9.3 Audit Trail → 9.4 hermes3 hardening
 
   Important concept:
   - Discord is primary runtime
