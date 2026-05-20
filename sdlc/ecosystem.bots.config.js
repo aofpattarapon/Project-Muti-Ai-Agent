@@ -18,5 +18,6 @@ module.exports = {
     base('sdlc-qa',     '-m agents.qa.agent'),
     base('sdlc-devops', '-m agents.devops.agent'),
     base('sdlc-cron',   'agents/hermes_cron.py'),   // Hermes Cron — background jobs
+    base('sdlc-quota-recovery', 'agents/recovery_worker.py'),
   ]
 }

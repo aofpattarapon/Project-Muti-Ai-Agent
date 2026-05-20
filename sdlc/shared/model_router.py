@@ -200,13 +200,18 @@ MODEL_SCORE_MATRIX: dict[str, dict[str, int]] = {
 }
 
 
-def best_free_for_role(role: str, exclude: list[str] = None) -> tuple[str, "ModelConfig"]:
+def best_free_for_role(
+    role: str,
+    exclude: list[str] = None,
+    exclude_providers: list[str] = None,
+) -> tuple[str, "ModelConfig"]:
     """
     Return (model_key, ModelConfig) of highest-scoring FREE model for this role.
     Excludes models in the exclude list (e.g., ones that already failed).
     Skips models whose provider is not available.
     """
     exclude = set(exclude or [])
+    exclude_providers = set(exclude_providers or [])
     # Check available providers (cached check — fast)
     available = _get_available_providers_cached()
 
@@ -218,6 +223,8 @@ def best_free_for_role(role: str, exclude: list[str] = None) -> tuple[str, "Mode
         if cfg.tier != ModelTier.FREE:
             continue
         if model_key in exclude:
+            continue
+        if cfg.provider in exclude_providers:
             continue
         if cfg.provider not in available:
             continue
@@ -363,6 +370,30 @@ def _fits_context(model_key: str, token_count: int) -> bool:
     if limit is None:
         return True  # cloud models — ไม่มี limit ใน router
     return token_count <= limit
+
+
+def _active_cooldown_blocks() -> tuple[set[str], set[str]]:
+    """Return (providers, model_keys) currently cooling down."""
+    try:
+        from shared.storage import Storage
+        cooldowns = Storage().get_active_provider_cooldowns()
+    except Exception:
+        return set(), set()
+
+    providers: set[str] = set()
+    model_keys: set[str] = set()
+    for cooldown in cooldowns:
+        provider = cooldown.get("provider") or ""
+        model = cooldown.get("model") or ""
+        if provider:
+            providers.add(provider)
+        if model:
+            model_keys.add(model)
+    return providers, model_keys
+
+
+def _is_cooling_down(model_key: str, cfg: ModelConfig, cooldown_providers: set[str], cooldown_models: set[str]) -> bool:
+    return model_key in cooldown_models or cfg.provider in cooldown_providers
 
 
 # ─── Complexity Analyzer ─────────────────────────────────────────
@@ -598,6 +629,7 @@ class ModelRouter:
         """
         # 1. Token count — ใช้สำหรับ context fit check
         prompt_tokens = _estimate_tokens(full_context or prompt)
+        cooldown_providers, cooldown_models = _active_cooldown_blocks()
 
         # 2. Complexity score
         complexity = self.analyzer.score(prompt, role)
@@ -611,7 +643,11 @@ class ModelRouter:
                 f"(spend=${self.tracker.today_spend():.4f})"
             )
             # ใช้ score matrix เลือก free model ที่ดีที่สุดสำหรับ role นี้
-            best_key, best_cfg = best_free_for_role(role)
+            best_key, best_cfg = best_free_for_role(
+                role,
+                exclude=list(cooldown_models),
+                exclude_providers=list(cooldown_providers),
+            )
             logging.warning(f"[Router] Budget fallback → {best_key} (score={score_for_role(best_key, role)}/10)")
             return best_cfg, best_key, complexity
 
@@ -625,11 +661,14 @@ class ModelRouter:
             escalation_threshold = TASK_TYPE_ESCALATION_SCORE.get(task_type, 80)
 
             provider_ok  = start_cfg and start_cfg.provider in self._available_providers
+            cooldown_ok  = bool(start_cfg) and not _is_cooling_down(
+                start_key, start_cfg, cooldown_providers, cooldown_models
+            )
             context_ok   = _fits_context(start_key, prompt_tokens)
             score_ok     = complexity < escalation_threshold
             budget_ok    = target_tier == ModelTier.FREE or not self.tracker.is_over_budget()
 
-            if provider_ok and context_ok and score_ok:
+            if provider_ok and cooldown_ok and context_ok and score_ok:
                 te = tier_emoji_map.get(start_cfg.tier, "?")
                 print(
                     f"[Router] role={role} task={task_type} complexity={complexity} "
@@ -649,6 +688,8 @@ class ModelRouter:
                     f"[Router] score {complexity} ≥ escalation threshold {escalation_threshold} "
                     f"for {task_type} → score-based routing"
                 )
+            elif not cooldown_ok:
+                print(f"[Router] {start_key} provider/model cooldown active → score-based routing")
 
         # 5. Score-based routing — ลอง tier fallback ตามลำดับ
         #    พร้อม context fit check ในแต่ละ candidate
@@ -668,6 +709,9 @@ class ModelRouter:
             for key in cands:
                 cfg = MODELS.get(key)
                 if not cfg or cfg.provider not in self._available_providers:
+                    continue
+                if _is_cooling_down(key, cfg, cooldown_providers, cooldown_models):
+                    print(f"[Router] {key} provider/model cooldown active → skip")
                     continue
                 if not _fits_context(key, prompt_tokens):
                     print(f"[Router] {key} context overflow ({prompt_tokens} tokens) → skip")

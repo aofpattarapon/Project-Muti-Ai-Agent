@@ -147,6 +147,14 @@ services:
       - ./data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
 
+  # ─── Phase 8 Quota Recovery Worker ───────────────────────────
+  quota-recovery:
+    <<: *agent-base
+    container_name: sdlc-quota-recovery
+    command: python agents/recovery_worker.py
+    environment:
+      - AGENT_ROLE=quota-recovery
+
   # ─── Ollama (Local LLM) ───────────────────────────────────────
   ollama:
     image: ollama/ollama:latest

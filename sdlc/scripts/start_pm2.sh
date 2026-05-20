@@ -34,8 +34,8 @@ sleep 1
 
 # Start all bots
 if [[ "$1" == "--no-cron" ]]; then
-  # Start all except cron
-  pm2 start ecosystem.bots.config.js --only "sdlc-ceo,sdlc-pm,sdlc-ba,sdlc-sa,sdlc-uxui,sdlc-dev,sdlc-qa,sdlc-devops"
+  # Start all except cron. Quota recovery still runs because it is part of task runtime safety.
+  pm2 start ecosystem.bots.config.js --only "sdlc-ceo,sdlc-pm,sdlc-ba,sdlc-sa,sdlc-uxui,sdlc-dev,sdlc-qa,sdlc-devops,sdlc-quota-recovery"
 else
   pm2 start ecosystem.bots.config.js
 fi

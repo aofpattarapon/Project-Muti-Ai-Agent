@@ -1,19 +1,22 @@
 # Multi-Agent AI Phase Notes
 
   Current status:
-  - Last verified commit: fc12447 Phase 8.3
-  - Phase 8 / 8.0 / 8.1 / 8.2 / 8.3 passed — all 599 Python + 115 TypeScript tests green
+  - Phase 8 FINALIZED — all commits clean, worktree clean after finalization commit
+  - All 599 Python + 115 TypeScript tests green
 
-  Phase 8 complete summary:
-  - 8.0: llm_error_classifier.py + DB pause schema (pause_reason/provider/model/retry_after_at)
-         + provider_cooldowns table + 6 storage methods
-  - 8.1: BaseAgent._pause_task_for_quota() — wraps LLM call, classifies error, pauses task
-         + WebBridge.extra_metadata param
-  - 8.2: agents/recovery_worker.py — tick() polls paused tasks, cross-checks provider cooldowns
-         requeues or defers, prunes expired cooldown rows; PM2 config already has sdlc-quota-recovery
-         + Storage.update_task_retry_after() + Storage.prune_expired_cooldowns()
-  - 8.3: Discord !sdlc_paused + !sdlc_resume commands (all roles)
-         Web App STATUS_BADGE: paused → yellow badge
+  Phase 8 complete summary (all commits verified):
+  - 8.0 (a8f0c06): llm_error_classifier.py + DB pause schema + provider_cooldowns table + 6 storage methods
+  - 8.1 (0fce75b): BaseAgent._pause_task_for_quota() + WebBridge.extra_metadata
+  - 8.2 (80b352d): agents/recovery_worker.py + Storage.update_task_retry_after/prune_expired_cooldowns
+  - 8.3 (fc12447): Discord !sdlc_paused + !sdlc_resume + Web App paused badge
+  - finalization: model_router cooldown-aware routing + Docker/PM2 deploy configs committed
+
+  Finalization details (previously uncommitted, now clean):
+  - model_router.py: _active_cooldown_blocks(), _is_cooling_down(), best_free_for_role(exclude_providers),
+    router skips cooling-down models/providers in budget fallback AND score-based routing
+  - docker-compose.yml: quota-recovery service running agents/recovery_worker.py
+  - ecosystem.bots.config.js: sdlc-quota-recovery process registered
+  - scripts/start_pm2.sh: --no-cron still starts sdlc-quota-recovery (runtime safety, not cron)
 
   Next phase:
   - Phase 9: TBD (decide with user)
