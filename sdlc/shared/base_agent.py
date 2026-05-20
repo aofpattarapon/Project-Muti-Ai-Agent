@@ -73,9 +73,12 @@ class BaseAgent(ABC):
         pass
 
     async def process_task(self, project: Project, input_data: dict) -> dict:
-        """Legacy role-task pipeline (pre-SDLC). Override only if needed."""
-        logger.warning(f"[{self.role_name}] process_task called on agent without implementation — returning stub")
-        return {"summary": f"{self.role_name.upper()} stub (SDLC task flow active)", "files": {}}
+        """Legacy role-task pipeline (pre-SDLC). Override in agents that support legacy flow."""
+        raise NotImplementedError(
+            f"[{self.role_name}] process_task() has no implementation — "
+            "this agent uses the SDLC task flow only. "
+            "Legacy auto-start should have been blocked by _check_and_start_pending_task()."
+        )
 
     def format_discord_output(self, output_data: dict, project: Project) -> str:
         """Standard output-channel format (all roles).  Override _get_role_metrics for role-specific data."""
@@ -1383,8 +1386,8 @@ class BaseAgent(ABC):
         for project in projects:
             if project.current_role != self.role_name:
                 continue
-            # G5: Skip old role_task pipeline if this project uses the new SDLC task flow
-            if self.storage.list_sdlc_tasks(project_id=project.id, role=self.role_name):
+            # G5: Skip old role_task pipeline if this project has ANY sdlc_tasks (any role)
+            if self.storage.list_sdlc_tasks(project_id=project.id):
                 continue
             existing = self.storage.get_task_by_project_role(project.id, self.role_name)
             if existing and existing.status in ("in_progress", "waiting_approval", "approved"):

@@ -108,4 +108,16 @@
       tests/control-plane.test.ts: 3× unused 'now', 1× unused 'meta'
       app/api/audit/export/route.ts and app/api/runtime/decisions/route.ts: no-explicit-any
 
+  Hotfix (post-Phase-9): legacy role pipeline blocked against SDLC projects
+    sdlc/shared/base_agent.py:
+      _check_and_start_pending_task() — guard changed from role-scoped to project-scoped:
+        Before: list_sdlc_tasks(project_id=..., role=self.role_name) — only checked own role
+        After:  list_sdlc_tasks(project_id=...) — checks ANY sdlc_task in project
+        Symptom: PM/BA/SA/UXUI agents fired legacy pipeline on projects with only CEO tasks
+      process_task() stub — now raises NotImplementedError instead of returning fake output:
+        Before: returned {"summary": "PM stub (SDLC task flow active)"} → posted as "Complete"
+        After:  raises NotImplementedError → caught by receive_task error handler → task "failed"
+        Symptom: PM Agent — Complete posted to Discord even though no PM work was done
+    sdlc/tests/test_hotfix_legacy_guard.py: 6 tests (legacy guard + process_task stub) — all green
+
   Next: Phase 10 TBD
