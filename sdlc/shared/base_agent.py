@@ -1680,32 +1680,44 @@ class BaseAgent(ABC):
         if not _val_ok:
             _fresh = self.storage.get_sdlc_task(task.id)
             _fail_count = ((_fresh.attempt_count if _fresh else 0) + 1)
+            _recovery_count = _fresh.recovery_count if _fresh else 0
             self._task_fail_counts[task.id] = _fail_count
+            # Per-cycle exhaustion: each recovery cycle allows _MAX_AUTO_RETRIES+1 attempts
+            _fail_count_in_cycle = _fail_count - _recovery_count * (_MAX_AUTO_RETRIES + 1)
+            _exhausted = _fail_count_in_cycle > _MAX_AUTO_RETRIES
             logger.warning(
                 f"[{self.role_name}] Validation failed for {task.id} "
-                f"(attempt {_fail_count}): {_val_error}"
+                f"(attempt {_fail_count}, cycle-attempt {_fail_count_in_cycle}): {_val_error}"
             )
-            # Inject the validation error into input_data so the next LLM call
-            # knows exactly what to fix
             self.storage.update_sdlc_task_input_data(
                 task.id,
                 {"revision_comment": f"[auto-validation] {_val_error}"},
             )
-            _requeue = _fail_count <= _MAX_AUTO_RETRIES
-            self.storage.record_sdlc_task_error(
-                task.id, f"Validation failed: {_val_error}", _fail_count, requeue=_requeue
-            )
-            # Finish timelog so it doesn't hang open
-            self.timelog.finish(log_id=log_id, model_used=_actual_model,
-                                cost_usd=_estimated_cost_usd,
-                                output_files=[], status="validation_failed")
-            if output_ch:
-                _status_label = "🔁 will retry" if _requeue else "💥 max retries — marked failed"
-                await output_ch.send(
-                    f"⚠️ **Validation Failed** — `{task.id}` (`{task.task_type}`)\n"
-                    f"**Error:** {_val_error[:200]}\n"
-                    f"**Attempt:** {_fail_count}/{_MAX_AUTO_RETRIES + 1} — {_status_label}"
+            if _exhausted:
+                await self._pause_task_for_contract(
+                    task=task, project_name=project_name,
+                    failure_type="validation_failed",
+                    missing_sections=_val_error,
+                    fail_count=_fail_count,
+                    recovery_count=_recovery_count,
+                    model_key=_actual_model,
+                    output_ch=output_ch, tlog_ch=tlog_ch,
+                    log_id=log_id, estimated_cost=_estimated_cost_usd,
+                    duration=_time.monotonic() - _start_ts,
                 )
+            else:
+                self.storage.record_sdlc_task_error(
+                    task.id, f"Validation failed: {_val_error}", _fail_count, requeue=True,
+                )
+                self.timelog.finish(log_id=log_id, model_used=_actual_model,
+                                    cost_usd=_estimated_cost_usd,
+                                    output_files=[], status="validation_failed")
+                if output_ch:
+                    await output_ch.send(
+                        f"⚠️ **Validation Failed** — `{task.id}` (`{task.task_type}`)\n"
+                        f"**Error:** {_val_error[:200]}\n"
+                        f"**Attempt:** {_fail_count_in_cycle}/{_MAX_AUTO_RETRIES + 1} — 🔁 will retry"
+                    )
             return
 
         # ─── Save output file to attempt staging ─────────────────────
@@ -1756,49 +1768,69 @@ class BaseAgent(ABC):
             # Read persisted attempt_count from DB so restart cannot lower the counter
             _fresh_for_contract = self.storage.get_sdlc_task(task.id)
             _fail_count = ((_fresh_for_contract.attempt_count if _fresh_for_contract else 0) + 1)
+            _recovery_count = _fresh_for_contract.recovery_count if _fresh_for_contract else 0
             self._task_fail_counts[task.id] = _fail_count
-            _requeue = _fail_count <= _MAX_AUTO_RETRIES
+            _fail_count_in_cycle = _fail_count - _recovery_count * (_MAX_AUTO_RETRIES + 1)
+            _exhausted = _fail_count_in_cycle > _MAX_AUTO_RETRIES
             logger.warning(
-                f"[{self.role_name}] Contract check failed for {task.id}: "
+                f"[{self.role_name}] Contract check failed for {task.id} "
+                f"(attempt {_fail_count}, cycle-attempt {_fail_count_in_cycle}): "
                 f"{_contract.revision_comment}"
             )
             self.storage.update_sdlc_task_input_data(
                 task.id, {"revision_comment": _contract.revision_comment},
             )
-            self.storage.record_sdlc_task_error(
-                task.id, _contract.revision_comment, _fail_count, requeue=_requeue,
-            )
-            self.timelog.finish(
-                log_id=log_id, model_used=_actual_model,
-                cost_usd=_estimated_cost_usd, output_files=[], status="contract_failed",
-            )
-            if output_ch:
-                _label = "🔁 will retry" if _requeue else "💥 max retries — marked failed"
-                await output_ch.send(
-                    f"📋 **Contract Check Failed** — `{task.id}` (`{task.task_type}`)\n"
-                    f"**Missing:** {_contract.revision_comment[:200]}\n"
-                    f"**Attempt:** {_fail_count}/{_MAX_AUTO_RETRIES + 1} — {_label}"
+            if _exhausted:
+                await self._pause_task_for_contract(
+                    task=task, project_name=project_name,
+                    failure_type="contract_failed",
+                    missing_sections=_contract.revision_comment,
+                    fail_count=_fail_count,
+                    recovery_count=_recovery_count,
+                    model_key=_actual_model,
+                    output_ch=output_ch, tlog_ch=tlog_ch,
+                    log_id=log_id, estimated_cost=_estimated_cost_usd,
+                    duration=_duration,
+                    contract_info={
+                        "contract_name": _contract.contract_name,
+                        "missing_sections": _contract.missing_sections,
+                        "missing_artifacts": _contract.missing_artifacts,
+                    },
                 )
-            await get_bridge().task_completed(
-                role_key=self.role_name,
-                project_id=task.project_id,
-                project_name=project_name,
-                task_name=task.title,
-                summary=f"[contract-failed] {_contract.revision_comment[:300]}",
-                files=[],
-                model_id=_actual_model,
-                cost_usd=_estimated_cost_usd,
-                duration_seconds=round(_duration, 1),
-                sdlc_task_id=task.id,
-                status="blocked",
-                error_info=_contract.revision_comment,
-                contract_info={
-                    "contract_status": "failed",
-                    "contract_name": _contract.contract_name,
-                    "missing_sections": _contract.missing_sections,
-                    "missing_artifacts": _contract.missing_artifacts,
-                },
-            )
+            else:
+                self.storage.record_sdlc_task_error(
+                    task.id, _contract.revision_comment, _fail_count, requeue=True,
+                )
+                self.timelog.finish(
+                    log_id=log_id, model_used=_actual_model,
+                    cost_usd=_estimated_cost_usd, output_files=[], status="contract_failed",
+                )
+                if output_ch:
+                    await output_ch.send(
+                        f"📋 **Contract Check Failed** — `{task.id}` (`{task.task_type}`)\n"
+                        f"**Missing:** {_contract.revision_comment[:200]}\n"
+                        f"**Attempt:** {_fail_count_in_cycle}/{_MAX_AUTO_RETRIES + 1} — 🔁 will retry"
+                    )
+                await get_bridge().task_completed(
+                    role_key=self.role_name,
+                    project_id=task.project_id,
+                    project_name=project_name,
+                    task_name=task.title,
+                    summary=f"[contract-failed] {_contract.revision_comment[:300]}",
+                    files=[],
+                    model_id=_actual_model,
+                    cost_usd=_estimated_cost_usd,
+                    duration_seconds=round(_duration, 1),
+                    sdlc_task_id=task.id,
+                    status="blocked",
+                    error_info=_contract.revision_comment,
+                    contract_info={
+                        "contract_status": "failed",
+                        "contract_name": _contract.contract_name,
+                        "missing_sections": _contract.missing_sections,
+                        "missing_artifacts": _contract.missing_artifacts,
+                    },
+                )
             return
 
         # The attempt is now valid. Promote it to the canonical location and
@@ -2081,6 +2113,162 @@ class BaseAgent(ABC):
         logger.warning(
             f"[{self.role_name}] task {task.id} paused ({err_info.error_type}) "
             f"provider={provider} retry_after={retry_after_at[:19]}"
+        )
+
+    async def _pause_task_for_contract(
+        self,
+        task: SdlcTask,
+        project_name: str,
+        failure_type: str,
+        missing_sections: str,
+        fail_count: int,
+        recovery_count: int,
+        model_key: str,
+        output_ch,
+        tlog_ch,
+        log_id: str,
+        estimated_cost: float,
+        duration: float,
+        contract_info: dict = None,
+    ):
+        """
+        Pause a task after max contract/validation retries so the recovery worker
+        can auto-requeue it after CONTRACT_RECOVERY_DELAY_SECONDS.
+
+        Unlike _pause_task_for_quota, this does NOT register a provider cooldown
+        because the failure is output quality, not a provider capacity issue.
+        """
+        from datetime import timedelta
+        _MAX_AUTO_RETRIES = 2
+        retry_s = int(os.getenv("CONTRACT_RECOVERY_DELAY_SECONDS", "300"))
+        retry_after_at = (datetime.utcnow() + timedelta(seconds=retry_s)).isoformat()
+        retry_time_str = retry_after_at[:19] + " UTC"
+
+        # 1. Persist pause state (increments recovery_count in DB)
+        self.storage.pause_sdlc_task_for_contract(
+            task_id=task.id,
+            failure_type=failure_type,
+            missing_sections=missing_sections,
+            model_key=model_key,
+            retry_after_at=retry_after_at,
+            attempt_count=fail_count,
+        )
+
+        # 2. Count downstream tasks that are currently blocked by this task
+        _downstream_count = 0
+        try:
+            import sqlite3 as _sq
+            with _sq.connect(self.storage.db_path) as _conn:
+                _rows = _conn.execute(
+                    "SELECT COUNT(*) FROM sdlc_tasks WHERE depends_on LIKE ? AND status='pending'",
+                    (f"%{task.id}%",),
+                ).fetchone()
+                _downstream_count = _rows[0] if _rows else 0
+        except Exception:
+            pass
+
+        _recovery_note = f"Recovery #{recovery_count + 1}"
+        _max_attempts = _MAX_AUTO_RETRIES + 1
+
+        # 3. Discord output channel — detailed pause notice
+        if output_ch:
+            _ds_note = f" | ⛔ {_downstream_count} downstream task(s) blocked" if _downstream_count else ""
+            await output_ch.send(
+                f"⏸️ **Task Paused for Auto-Recovery** — `{task.id}` (`{task.task_type}`)\n"
+                f"**Role:** {self.role_name.upper()} | **Project:** `{task.project_id}`\n"
+                f"**Error type:** `{failure_type}`\n"
+                f"**Missing:** {missing_sections[:300]}\n"
+                f"**Attempt:** {fail_count}/{_max_attempts} ({_recovery_note}){_ds_note}\n"
+                f"**Model:** `{model_key}`\n"
+                f"**Next retry:** {retry_time_str} (auto — {retry_s}s)\n"
+                f"**Commands:** `!sdlc_status {task.project_id}` | "
+                f"`!sdlc_paused` | `!sdlc_resume {task.id}`"
+            )
+
+        # 4. Close timelog
+        finished = self.timelog.finish(
+            log_id=log_id,
+            model_used=model_key,
+            cost_usd=estimated_cost,
+            output_files=[],
+            status=failure_type,
+        )
+
+        # 5. Timelog channel — detailed error entry
+        if tlog_ch and finished:
+            await tlog_ch.send(embed=self.timelog.build_finish_embed(finished, project_name))
+            # Additional detail message for operator debugging
+            await tlog_ch.send(
+                f"📋 **Contract/Validation Error Detail** — `{task.id}`\n"
+                f"**Task:** {task.title or task.task_type}\n"
+                f"**Error:** `{failure_type}` | **Attempt:** {fail_count} "
+                f"(cycle-attempt {fail_count - recovery_count * _max_attempts}/{_max_attempts})\n"
+                f"**Missing sections:** `{missing_sections[:400]}`\n"
+                f"**Model:** `{model_key}`\n"
+                f"**Next retry after:** `{retry_time_str}`\n"
+                f"**Downstream blocked:** {_downstream_count} task(s)\n"
+                f"**Action:** ⏸️ paused_for_recovery (auto_contract_retry)"
+            )
+
+        # 6. Web App notification (status=paused)
+        _contract_info = contract_info or {}
+        await get_bridge().task_completed(
+            role_key=self.role_name,
+            project_id=task.project_id,
+            project_name=project_name,
+            task_name=task.title,
+            summary=(
+                f"⏸️ Task paused for auto-recovery: {failure_type}. "
+                f"Missing: {missing_sections[:200]}. "
+                f"Next retry {retry_time_str}."
+            ),
+            files=[],
+            model_id=model_key,
+            cost_usd=estimated_cost,
+            duration_seconds=round(duration, 1),
+            sdlc_task_id=task.id,
+            status="paused",
+            error_info=missing_sections,
+            extra_metadata=dict(
+                pause_reason=failure_type,
+                pause_model=model_key,
+                retry_after_at=retry_after_at,
+                resume_policy="auto_contract_retry",
+                recovery_count=recovery_count + 1,
+                attempt_count=fail_count,
+                downstream_blocked=_downstream_count,
+                **_contract_info,
+            ),
+        )
+
+        # 7. Audit event
+        await get_bridge().post_event(
+            role_key=self.role_name,
+            event_type="agent.task.paused",
+            task_name=task.title or task.id,
+            status="paused",
+            summary=(
+                f"Task {task.id} paused for contract recovery: {failure_type}. "
+                f"Missing: {missing_sections[:150]}. Resume after {retry_time_str}."
+            ),
+            sdlc_task_id=task.id,
+            project_id=task.project_id,
+            metadata=dict(
+                pause_reason=failure_type,
+                pause_model=model_key,
+                retry_after_at=retry_after_at,
+                resume_policy="auto_contract_retry",
+                recovery_count=recovery_count + 1,
+                attempt_count=fail_count,
+                missing_sections=missing_sections[:300],
+            ),
+            actor="system",
+        )
+
+        logger.warning(
+            f"[{self.role_name}] task {task.id} paused for contract recovery "
+            f"({failure_type}) attempt={fail_count} recovery={recovery_count + 1} "
+            f"retry_after={retry_time_str}"
         )
 
     def _build_sdlc_context(self, task: SdlcTask, project_name: str, input_data: dict) -> dict:

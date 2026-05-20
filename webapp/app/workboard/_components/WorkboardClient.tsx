@@ -55,19 +55,27 @@ export function AutoRefresh({ intervalMs = 12000 }: { intervalMs?: number }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
   const [countdown, setCountdown] = useState(intervalMs / 1000);
+  const shouldRefreshRef = useRef(false);
 
   useEffect(() => {
     const tick = setInterval(() => {
       setCountdown((c) => {
         if (c <= 1) {
-          startTransition(() => router.refresh());
+          shouldRefreshRef.current = true;
           return intervalMs / 1000;
         }
         return c - 1;
       });
     }, 1000);
     return () => clearInterval(tick);
-  }, [router, intervalMs, startTransition]);
+  }, [intervalMs]);
+
+  useEffect(() => {
+    if (shouldRefreshRef.current) {
+      shouldRefreshRef.current = false;
+      startTransition(() => router.refresh());
+    }
+  });
 
   return (
     <span className="text-xs text-slate-500 tabular-nums">

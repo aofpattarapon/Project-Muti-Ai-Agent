@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { readdir, readFile } from 'fs/promises'
 import path from 'path'
 
-const OUTPUT_BASE = process.env.OUTPUT_BASE_PATH || '/home/socket9companylimited/projects/multi-ai-agent/sdlc/outputs'
+const OUTPUT_BASE = process.env.OUTPUT_BASE_PATH || '/home/off_poff_p/projects/multi-ai-agent/sdlc/outputs'
 
 export async function GET(req: NextRequest) {
   const project = req.nextUrl.searchParams.get('project')

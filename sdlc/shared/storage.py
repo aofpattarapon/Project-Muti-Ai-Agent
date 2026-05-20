@@ -69,7 +69,8 @@ class SdlcTask:
     pause_model: str = ""    # model_key that triggered the pause
     retry_after_at: str = "" # ISO timestamp — earliest time recovery worker may requeue
     paused_at: str = ""      # ISO timestamp when task entered paused state
-    resume_policy: str = ""  # "auto" | "manual_token_fix"
+    resume_policy: str = ""  # "auto" | "manual_token_fix" | "auto_contract_retry"
+    recovery_count: int = 0  # incremented each time task enters contract/validation recovery pause
 
 
 class RoleType(str, Enum):
@@ -216,12 +217,14 @@ class Storage:
                 ("claimed_at",     "TEXT DEFAULT ''"),
                 ("claimed_by",     "TEXT DEFAULT ''"),
                 # Phase 8 pause fields
-                ("pause_reason",   "TEXT DEFAULT ''"),
-                ("pause_provider", "TEXT DEFAULT ''"),
-                ("pause_model",    "TEXT DEFAULT ''"),
-                ("retry_after_at", "TEXT DEFAULT ''"),
-                ("paused_at",      "TEXT DEFAULT ''"),
-                ("resume_policy",  "TEXT DEFAULT ''"),
+                ("pause_reason",    "TEXT DEFAULT ''"),
+                ("pause_provider",  "TEXT DEFAULT ''"),
+                ("pause_model",     "TEXT DEFAULT ''"),
+                ("retry_after_at",  "TEXT DEFAULT ''"),
+                ("paused_at",       "TEXT DEFAULT ''"),
+                ("resume_policy",   "TEXT DEFAULT ''"),
+                # Contract-recovery fields
+                ("recovery_count",  "INTEGER DEFAULT 0"),
             ]:
                 if _col not in _sdlc_cols:
                     conn.execute(f"ALTER TABLE sdlc_tasks ADD COLUMN {_col} {_defn}")
@@ -764,6 +767,7 @@ class Storage:
             retry_after_at=_s(26),
             paused_at=_s(27),
             resume_policy=_s(28),
+            recovery_count=_i(29),
         )
 
     def get_sdlc_task_by_title(self, task_name: str, role: str) -> Optional[SdlcTask]:
@@ -830,6 +834,46 @@ class Storage:
                    WHERE id=?""",
                 (reason, provider, model, retry_after_at, now,
                  resume_policy, error[:500], now, task_id),
+            )
+            conn.commit()
+
+    def pause_sdlc_task_for_contract(
+        self,
+        task_id: str,
+        failure_type: str,
+        missing_sections: str,
+        model_key: str,
+        retry_after_at: str,
+        attempt_count: int,
+    ):
+        """
+        Pause a task after max contract/validation retries.
+
+        Sets resume_policy='auto_contract_retry' so the recovery worker picks it up
+        without treating it as a manual_token_fix hold. Increments recovery_count for
+        audit; attempt_count is preserved so per-cycle exhaustion can be computed.
+        Does NOT set pause_provider — contract failures are output quality, not
+        provider outage, so no provider cooldown is registered.
+        """
+        now = datetime.utcnow().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """UPDATE sdlc_tasks
+                   SET status='paused',
+                       pause_reason=?,
+                       pause_provider='',
+                       pause_model=?,
+                       retry_after_at=?,
+                       paused_at=?,
+                       resume_policy='auto_contract_retry',
+                       attempt_count=?,
+                       last_error=?,
+                       recovery_count=recovery_count+1,
+                       claimed_at='', claimed_by='',
+                       updated_at=?
+                   WHERE id=?""",
+                (failure_type, model_key, retry_after_at, now,
+                 attempt_count, missing_sections[:500], now, task_id),
             )
             conn.commit()
 

@@ -7,7 +7,7 @@ import os from 'os'
 import { promisify } from 'util'
 
 const execAsync = promisify(exec)
-const OUTPUT_BASE = process.env.OUTPUT_BASE_PATH || '/home/socket9companylimited/projects/multi-ai-agent/sdlc/outputs'
+const OUTPUT_BASE = process.env.OUTPUT_BASE_PATH || '/home/off_poff_p/projects/multi-ai-agent/sdlc/outputs'
 
 /**
  * GET /api/project-logs/files/download-zip?project=PROJ123&role=sa

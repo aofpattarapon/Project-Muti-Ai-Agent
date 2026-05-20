@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const SDLC_ROOT = path.dirname(
-  process.env.OUTPUT_BASE_PATH ?? "/home/socket9companylimited/projects/multi-ai-agent/sdlc/outputs",
+  process.env.OUTPUT_BASE_PATH ?? "/home/off_poff_p/projects/multi-ai-agent/sdlc/outputs",
 );
 export const SDLC_ENV_PATH = path.join(SDLC_ROOT, ".env");
 
