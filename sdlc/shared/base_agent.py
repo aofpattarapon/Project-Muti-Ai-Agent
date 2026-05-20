@@ -2030,9 +2030,14 @@ class BaseAgent(ABC):
         # Load project_brief if available
         project = self.storage.get_project(task.project_id)
         if project:
-            ctx["project_brief"] = project.description or ""
-            # Prefer full requirements from input_data (stored at task creation); fall back
-            # to project.description which is truncated to 500 chars.
+            # Prefer full text from input_data (never truncated); fall back to
+            # project.description which is capped at 500 chars on storage.
+            ctx["project_brief"] = (
+                input_data.get("project_brief")
+                or input_data.get("project_brief_content")
+                or project.description
+                or ""
+            )
             ctx["requirements"] = (
                 input_data.get("requirements")
                 or project.description

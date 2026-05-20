@@ -318,7 +318,7 @@ class CEOAgent(BaseAgent):
 
     def _get_completed_ceo_task(self, project_id: str, task_type: str) -> Optional[SdlcTask]:
         for t in self.storage.list_sdlc_tasks(project_id=project_id, role="ceo"):
-            if t.task_type == task_type and t.status == "completed":
+            if t.task_type == task_type and t.status in ("completed", "approved"):
                 return t
         return None
 

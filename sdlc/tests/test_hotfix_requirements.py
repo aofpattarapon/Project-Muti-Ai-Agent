@@ -314,5 +314,135 @@ class TestStageGates(unittest.TestCase):
                             "BA brd must have a dependency (stage gate)")
 
 
+# ─── 7: _build_sdlc_context project_brief fix ────────────────────────────────
+
+class TestBuildSdlcContextProjectBrief(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ["DB_PATH"] = os.path.join(self._tmp.name, "test.db")
+        self.storage = Storage(db_path=os.environ["DB_PATH"])
+        self.agent = _make_agent(self.storage)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        os.environ.pop("DB_PATH", None)
+
+    def _create_project(self, project_id: str, description: str = "") -> Project:
+        proj = Project(
+            id=project_id, name="Test Project",
+            description=description,
+            created_at=datetime.utcnow().isoformat(),
+            current_role="pm", status="active",
+            discord_guild_id="", approval_channel_id="",
+        )
+        self.storage.create_project(proj)
+        return proj
+
+    def test_project_brief_from_input_data_preferred_over_description(self):
+        """input_data['project_brief'] must win over truncated project.description."""
+        full_brief = "## Full Brief\n" + ("Detail section. " * 50) + "\nTimeline: 4 weeks"
+        short_desc = full_brief[:500]
+        self.assertNotIn("Timeline: 4 weeks", short_desc)
+
+        self._create_project("PB01", description=short_desc)
+        task = _make_sdlc_task("PB01", "project_charter", {"project_brief": full_brief})
+
+        ctx = self.agent._build_sdlc_context(task, "Test Project", json.loads(task.input_data))
+
+        self.assertIn("Timeline: 4 weeks", ctx["project_brief"])
+        self.assertGreater(len(ctx["project_brief"]), 500)
+
+    def test_project_brief_content_fallback(self):
+        """input_data['project_brief_content'] (CEO epics task key) also works."""
+        content = "## Brief Content\nSome content here\nTimeline: 6 weeks"
+        self._create_project("PB02", description="short desc")
+        task = _make_sdlc_task("PB02", "epics", {"project_brief_content": content})
+
+        ctx = self.agent._build_sdlc_context(task, "Test Project", json.loads(task.input_data))
+
+        self.assertIn("Timeline: 6 weeks", ctx["project_brief"])
+
+    def test_project_brief_falls_back_to_description_when_no_input_key(self):
+        """Falls back to project.description when input_data has no brief keys."""
+        self._create_project("PB03", description="Fallback project desc")
+        task = _make_sdlc_task("PB03", "project_charter", {})
+
+        ctx = self.agent._build_sdlc_context(task, "Test Project", json.loads(task.input_data))
+
+        self.assertEqual(ctx["project_brief"], "Fallback project desc")
+
+
+# ─── 8: _get_completed_ceo_task accepts "approved" status ────────────────────
+
+class TestGetCompletedCEOTask(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ["DB_PATH"] = os.path.join(self._tmp.name, "test.db")
+        self.storage = Storage(db_path=os.environ["DB_PATH"])
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        from agents.ceo.agent import CEOAgent
+        with patch("shared.base_agent.CostTracker"), \
+             patch("shared.base_agent.TimeLogger"), \
+             patch("shared.base_agent.OutputProcessor"), \
+             patch("shared.base_agent.LLMClient"):
+            self.agent = CEOAgent.__new__(CEOAgent)
+        self.agent.storage = self.storage
+        self.agent.role_name = "ceo"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        os.environ.pop("DB_PATH", None)
+
+    def _make_ceo_task(self, project_id: str, task_type: str, status: str) -> SdlcTask:
+        now = datetime.utcnow().isoformat()
+        pid = f"{project_id}-PROJECT"
+        t = SdlcTask(
+            id=f"{pid}-CEO01", project_id=project_id,
+            epic_id=pid, task_number=1, role="ceo", task_type=task_type,
+            title="CEO task", description="",
+            output_file="brief.md", output_format="markdown",
+            depends_on="", status=status,
+            input_data=json.dumps({"requirements": "req text"}),
+            output_data="## Project Brief\nContent here",
+            approval_msg_id="", revision_count=0, notes="",
+            created_at=now, updated_at=now,
+        )
+        self.storage.create_sdlc_task(t)
+        return t
+
+    def test_finds_task_with_completed_status(self):
+        self._make_ceo_task("PC01", "project_brief", "completed")
+        result = self.agent._get_completed_ceo_task("PC01", "project_brief")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.task_type, "project_brief")
+
+    def test_finds_task_with_approved_status(self):
+        """Manual approval flow sets CEO tasks to 'approved', not 'completed'."""
+        self._make_ceo_task("PC02", "project_brief", "approved")
+        result = self.agent._get_completed_ceo_task("PC02", "project_brief")
+        self.assertIsNotNone(result, "_get_completed_ceo_task must find 'approved' tasks")
+        self.assertEqual(result.status, "approved")
+
+    def test_does_not_find_pending_task(self):
+        self._make_ceo_task("PC03", "project_brief", "pending")
+        result = self.agent._get_completed_ceo_task("PC03", "project_brief")
+        self.assertIsNone(result)
+
+    def test_downstream_project_brief_empty_when_ceo_brief_only_approved(self):
+        """
+        Regression: before fix, approved CEO task returned None → brief_content=""
+        → all PM/BA/SA tasks got input_data['project_brief'] = "".
+        After fix, brief_content is populated from the approved task.
+        """
+        t = self._make_ceo_task("PC04", "project_brief", "approved")
+        result = self.agent._get_completed_ceo_task("PC04", "project_brief")
+        self.assertIsNotNone(result)
+        brief_content = result.output_data
+        self.assertIn("Project Brief", brief_content,
+                      "Downstream tasks must receive non-empty project_brief")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
