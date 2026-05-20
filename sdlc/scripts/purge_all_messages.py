@@ -20,8 +20,9 @@ GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 TOKEN    = os.getenv("CEO_DISCORD_TOKEN", "")
 BULK_CUTOFF = datetime.now(timezone.utc) - timedelta(days=13, hours=23)
 
-# ชื่อที่มี keyword เหล่านี้จะถูกข้าม (case-insensitive)
-SKIP_KEYWORDS = ["log"]
+# Exact channel names to preserve. Timelog channels are test/runtime output
+# and should be purgeable; only the operator's #log channel is preserved.
+SKIP_CHANNEL_NAMES = {"log"}
 
 
 async def purge_channel(channel: discord.TextChannel) -> int:
@@ -89,8 +90,8 @@ async def purge():
         print(f"🔍 Found {len(channels)} text channels in {guild.name}\n")
 
         for channel in channels:
-            if any(kw in channel.name.lower() for kw in SKIP_KEYWORDS):
-                print(f"  ⏭️  #{channel.name}: skipped (log channel)")
+            if channel.name.lower() in SKIP_CHANNEL_NAMES:
+                print(f"  ⏭️  #{channel.name}: skipped (preserved channel)")
                 continue
             total += await purge_channel(channel)
 
@@ -101,9 +102,9 @@ async def purge():
 
 
 if __name__ == "__main__":
-    print("⚠️  This will delete messages in all channels EXCEPT log channels.")
+    print("⚠️  This will delete messages in all channels EXCEPT preserved channels.")
     print(f"   Guild: {GUILD_ID}")
-    print(f"   Skip keywords: {SKIP_KEYWORDS}")
+    print(f"   Preserved channels: {sorted(SKIP_CHANNEL_NAMES)}")
     confirm = input("   Type 'yes' to proceed: ").strip().lower()
     if confirm == "yes":
         asyncio.run(purge())

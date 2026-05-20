@@ -313,6 +313,24 @@ class TestStageGates(unittest.TestCase):
         self.assertNotEqual(ba_brd["depends_on"], "",
                             "BA brd must have a dependency (stage gate)")
 
+    def test_pm_project_tasks_are_sequenced_after_management_plan(self):
+        """PM deliverables should not all start in parallel after project_charter."""
+        epics = [{"id": "P4-E001", "title": "Epic 1", "goal": "g", "priority": "P0"}]
+        tasks = build_project_tasks("P4", epics, include_roles=["pm"])
+        by_type = {t["task_type"]: t for t in tasks if t["role"] == "pm"}
+
+        charter_id = by_type["project_charter"]["id"]
+        plan_id = by_type["project_management_plan"]["id"]
+        comms_id = by_type["communications_plan"]["id"]
+        risk_id = by_type["risk_register"]["id"]
+
+        self.assertEqual(by_type["project_management_plan"]["depends_on"], charter_id)
+        self.assertEqual(by_type["raci_matrix"]["depends_on"], plan_id)
+        self.assertEqual(by_type["risk_register"]["depends_on"], plan_id)
+        self.assertEqual(by_type["communications_plan"]["depends_on"], plan_id)
+        status_deps = set(by_type["project_status_report"]["depends_on"].split(","))
+        self.assertEqual(status_deps, {comms_id, risk_id})
+
 
 # ─── 7: _build_sdlc_context project_brief fix ────────────────────────────────
 

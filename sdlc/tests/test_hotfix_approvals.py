@@ -110,6 +110,7 @@ class TestApprovalChannelRouting(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
         os.environ.pop("DB_PATH", None)
+        os.environ.pop("OUTPUT_BASE_PATH", None)
 
     def _make_guild(self):
         """Build a mock guild with named channels tracked by name."""
@@ -312,6 +313,34 @@ class TestDiscordApproveSync(unittest.TestCase):
 
         self.assertEqual(captured_kwargs.get("sdlc_task_id"), task.id)
 
+    def test_discord_approve_hook_error_keeps_approved_and_notifies(self):
+        """A post-approval hook failure must not ask for approval again."""
+        agent = _make_agent(self.storage, "pm")
+        task = _make_task(self.storage, "PROJ-DA3", "PROJ-DA3-PROJECT-PM01",
+                          role="pm", approval_mode="manual")
+        self.storage.update_sdlc_task_status(task.id, "waiting_approval")
+
+        from shared.base_agent import DecisionAction
+        mock_intent = MagicMock()
+        mock_intent.action = DecisionAction.APPROVE
+        mock_intent.note = ""
+
+        message = MagicMock()
+        message.author = "TestUser#1234"
+        message.channel.send = AsyncMock()
+
+        with patch("shared.base_agent.get_bridge") as mock_bridge, \
+             patch.object(agent, "_on_sdlc_task_completed", AsyncMock(side_effect=RuntimeError("downstream failed"))):
+            mock_bridge.return_value.approved = AsyncMock()
+            mock_bridge.return_value.error = AsyncMock()
+            asyncio.run(agent._handle_sdlc_decision(message, task, mock_intent))
+
+        fresh = self.storage.get_sdlc_task(task.id)
+        self.assertEqual(fresh.status, "approved")
+        sent = "\n".join(str(call.args[0]) for call in message.channel.send.await_args_list)
+        self.assertIn("No new approval is required", sent)
+        mock_bridge.return_value.error.assert_awaited_once()
+
 
 # ─── 4: Web decision uses role-specific approve channel ──────────────────────
 
@@ -397,6 +426,44 @@ class TestWebDecisionRoleChannel(unittest.TestCase):
             # Must not raise even without DISCORD_APPROVAL_CHANNEL_ID
             asyncio.run(agent._execute_web_decision(item))
 
+    def test_web_approve_hook_error_keeps_approved_and_notifies(self):
+        """Web approval remains approved when downstream hook notification fails."""
+        agent = _make_agent(self.storage, "sa")
+        task = _make_task(self.storage, "PROJ-WD3", "PROJ-WD3-PROJECT-SA01",
+                          role="sa", approval_mode="manual")
+        self.storage.update_sdlc_task_status(task.id, "waiting_approval")
+        agent.bot = MagicMock()
+        agent.bot.guilds = [MagicMock()]
+        sent_messages: list[str] = []
+
+        async def _ch_factory(guild_obj, name):
+            ch = MagicMock()
+            async def _send(msg=None, **kwargs):
+                if msg:
+                    sent_messages.append(str(msg))
+                return MagicMock(id=444)
+            ch.send = AsyncMock(side_effect=_send)
+            return ch
+
+        item = {
+            "id": 3, "status": "approved", "task_name": task.title,
+            "decision_note": "", "approver": "web-ui",
+            "sdlc_task_id": task.id,
+        }
+
+        with patch("shared.base_agent.get_guild_channel", side_effect=_ch_factory), \
+             patch("shared.base_agent.get_bridge") as mock_bridge, \
+             patch.object(agent, "_on_sdlc_task_completed", AsyncMock(side_effect=RuntimeError("stage gate failed"))):
+            mock_bridge.return_value.approved = AsyncMock()
+            mock_bridge.return_value.error = AsyncMock()
+            mock_bridge.return_value.mark_decision_processed = AsyncMock()
+            asyncio.run(agent._execute_web_decision(item))
+
+        fresh = self.storage.get_sdlc_task(task.id)
+        self.assertEqual(fresh.status, "approved")
+        self.assertTrue(any("No new approval is required" in msg for msg in sent_messages))
+        mock_bridge.return_value.error.assert_awaited_once()
+
 
 # ─── 5: Contract-failed tasks don't create approval items ─────────────────────
 
@@ -413,6 +480,7 @@ class TestContractFailedNoApproval(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
         os.environ.pop("DB_PATH", None)
+        os.environ.pop("OUTPUT_BASE_PATH", None)
 
     def test_contract_failed_calls_bridge_with_blocked_status(self):
         """_execute_sdlc_task must call task_completed(status='blocked') on contract failure."""
@@ -462,6 +530,95 @@ class TestContractFailedNoApproval(unittest.TestCase):
         # approval_msg_id must remain empty (no approval card posted)
         fresh = self.storage.get_sdlc_task(task.id)
         self.assertEqual(fresh.approval_msg_id if fresh else "", "")
+
+    def test_contract_failed_attempt_does_not_overwrite_final_artifact(self):
+        """Failed retries stay in .attempts and must not replace the final artifact."""
+        os.environ["OUTPUT_BASE_PATH"] = os.path.join(self._tmp.name, "outputs")
+        agent = _make_agent(self.storage, "pm")
+        task = _make_task(self.storage, "PROJ-CF2", "PROJ-CF2-PROJECT-PM01",
+                          role="pm", approval_mode="manual")
+        task.output_format = "markdown"
+        task.output_file = "project_charter.md"
+
+        final_dir = os.path.join(
+            os.environ["OUTPUT_BASE_PATH"],
+            "projects", task.project_id, task.epic_id, task.role,
+        )
+        final_path = os.path.join(final_dir, task.output_file)
+        os.makedirs(final_dir, exist_ok=True)
+        with open(final_path, "w", encoding="utf-8") as f:
+            f.write("previous approved artifact")
+
+        async def _ch_factory(guild_obj, name):
+            ch = MagicMock()
+            ch.send = AsyncMock(return_value=MagicMock(id=1))
+            return ch
+
+        _fail_contract = MagicMock(
+            status="failed",
+            contract_name="project_charter",
+            revision_comment="Missing section: Constraints",
+            missing_sections=["Constraints"],
+            missing_artifacts=[],
+        )
+
+        with patch("shared.channel_config.get_guild_channel", side_effect=_ch_factory), \
+             patch("shared.base_agent.get_bridge") as mock_bridge, \
+             patch.object(agent, "call_llm", AsyncMock(return_value="# New invalid attempt\n\nbody")), \
+             patch.object(agent, "_build_sdlc_context", return_value={}), \
+             patch("shared.artifact_contracts.validate_role_artifact_contract", return_value=_fail_contract), \
+             patch("shared.artifact_validator.validate_artifact", return_value=(True, "")), \
+             patch("shared.base_agent.get_router") as mock_router:
+            _setup_mock_bridge(mock_bridge)
+            mock_router.return_value.get_routing_summary.return_value = {
+                "model_id": "test-model", "tier": "free", "provider": "test"
+            }
+            asyncio.run(agent._execute_sdlc_task(task, MagicMock()))
+
+        with open(final_path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "previous approved artifact")
+        attempts_dir = os.path.join(final_dir, ".attempts")
+        self.assertTrue(os.path.isdir(attempts_dir), "failed attempt should be retained under .attempts")
+        fresh = self.storage.get_sdlc_task(task.id)
+        self.assertEqual(fresh.approval_msg_id if fresh else "", "")
+
+    def test_contract_pass_promotes_attempt_to_final_artifact(self):
+        """Only a contract-passing attempt should update the canonical output path."""
+        os.environ["OUTPUT_BASE_PATH"] = os.path.join(self._tmp.name, "outputs")
+        agent = _make_agent(self.storage, "pm")
+        task = _make_task(self.storage, "PROJ-CF3", "PROJ-CF3-PROJECT-PM01",
+                          role="pm", approval_mode="manual")
+        task.output_format = "markdown"
+        task.output_file = "project_charter.md"
+
+        async def _ch_factory(guild_obj, name):
+            ch = MagicMock()
+            ch.send = AsyncMock(return_value=MagicMock(id=123))
+            return ch
+
+        _ok_contract = MagicMock(status="ok", contract_name="", revision_comment="",
+                                 missing_sections=[], missing_artifacts=[])
+
+        with patch("shared.channel_config.get_guild_channel", side_effect=_ch_factory), \
+             patch("shared.base_agent.get_bridge") as mock_bridge, \
+             patch.object(agent, "call_llm", AsyncMock(return_value="# Approved artifact\n\nbody")), \
+             patch.object(agent, "_build_sdlc_context", return_value={}), \
+             patch("shared.artifact_contracts.validate_role_artifact_contract", return_value=_ok_contract), \
+             patch("shared.artifact_validator.validate_artifact", return_value=(True, "")), \
+             patch.object(agent, "_on_sdlc_task_completed", AsyncMock()), \
+             patch("shared.base_agent.get_router") as mock_router:
+            _setup_mock_bridge(mock_bridge)
+            mock_router.return_value.get_routing_summary.return_value = {
+                "model_id": "test-model", "tier": "free", "provider": "test"
+            }
+            asyncio.run(agent._execute_sdlc_task(task, MagicMock()))
+
+        final_path = os.path.join(
+            os.environ["OUTPUT_BASE_PATH"],
+            "projects", task.project_id, task.epic_id, task.role, task.output_file,
+        )
+        with open(final_path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "# Approved artifact\n\nbody")
 
 
 # ─── 6: Role approve channel is correct for every role ───────────────────────
