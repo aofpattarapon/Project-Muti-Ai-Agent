@@ -33,15 +33,24 @@ interface TickEntry {
   dry_run: boolean;
 }
 
-function readRuntimeStatus(): RuntimeStatus {
+interface RuntimeStatusWithAlive extends RuntimeStatus {
+  workerAlive: boolean;
+}
+
+function readRuntimeStatus(): RuntimeStatusWithAlive {
   const base = process.env.OUTPUT_BASE_PATH ?? "/app/outputs";
   const file = path.join(base, "recovery", "runtime_status.json");
+  let parsed: RuntimeStatus;
   try {
     if (!fs.existsSync(file)) throw new Error("missing");
-    return JSON.parse(fs.readFileSync(file, "utf-8")) as RuntimeStatus;
+    parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as RuntimeStatus;
   } catch {
-    return { last_tick: null, worker_alive: false, paused_count: 0, ready_to_resume_count: 0, cooldowns: [], last_stats: null };
+    parsed = { last_tick: null, worker_alive: false, paused_count: 0, ready_to_resume_count: 0, cooldowns: [], last_stats: null };
   }
+  const workerAlive = parsed.last_tick
+    ? Date.now() - new Date(parsed.last_tick).getTime() < 10 * 60 * 1000
+    : false;
+  return { ...parsed, workerAlive };
 }
 
 function readTickHistory(limit = 50): TickEntry[] {
@@ -97,10 +106,7 @@ export default async function RecoveryPage() {
   const status   = readRuntimeStatus();
   const ticks    = readTickHistory(30);
   const paused   = listPausedTaskEvents(100);
-
-  const workerAlive = status.last_tick
-    ? Date.now() - new Date(status.last_tick).getTime() < 10 * 60 * 1000
-    : false;
+  const { workerAlive } = status;
 
   return (
     <div className="p-6 space-y-6 max-w-5xl mx-auto">

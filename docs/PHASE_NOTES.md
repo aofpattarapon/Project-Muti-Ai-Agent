@@ -34,7 +34,7 @@
       Prerequisite hotfix: listPausedTaskEvents() now uses correlated MAX(id) subquery — excludes tasks
         where a newer event (resume/complete) has overridden the paused status.
       webapp/app/recovery/page.tsx: server component, reads data directly (no auth friction)
-        Panels: Worker Status bar, Paused Task Queue (with ResumeButton for manual_token_fix), 
+        Panels: Worker Status bar, Paused Task Queue (with ResumeButton for manual_token_fix),
                 Active Provider Cooldowns, Recovery Tick Log
         Auto-refresh every 30s via router.refresh()
       webapp/app/recovery/_components/ResumeButton.tsx: "use client" — POSTs to resume API

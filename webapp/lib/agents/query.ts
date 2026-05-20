@@ -1487,6 +1487,11 @@ export function upsertResumeRequestFlag(sdlcTaskId: string, operatorUser: string
 
 export function listBlockedEvents(opts: { roleKey?: string; limit?: number }): AgentActivityLogRecord[] {
   const limit = opts.limit ?? 50;
+  type ActivityLogRow = {
+    id: number; role_key: string; event_type: string; task_name: string; status: string;
+    summary: string; artifact_ref: string | null; channel_target: string | null;
+    created_at: string; sdlc_task_id: string; project_id: string; metadata: string;
+  };
   const rows = opts.roleKey
     ? (db
         .prepare(
@@ -1496,7 +1501,7 @@ export function listBlockedEvents(opts: { roleKey?: string; limit?: number }): A
            WHERE event_type = 'devops_blocked' AND role_key = ?
            ORDER BY id DESC LIMIT ?`,
         )
-        .all(opts.roleKey, limit) as any[])
+        .all(opts.roleKey, limit) as ActivityLogRow[])
     : (db
         .prepare(
           `SELECT id, role_key, event_type, task_name, status, summary, artifact_ref, channel_target,
@@ -1505,6 +1510,6 @@ export function listBlockedEvents(opts: { roleKey?: string; limit?: number }): A
            WHERE event_type = 'devops_blocked'
            ORDER BY id DESC LIMIT ?`,
         )
-        .all(limit) as any[]);
+        .all(limit) as ActivityLogRow[]);
   return rows.map((r) => mapAgentActivityLog(r)).filter((r): r is AgentActivityLogRecord => r !== null);
 }
