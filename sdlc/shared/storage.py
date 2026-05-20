@@ -925,6 +925,23 @@ class Storage:
             for r in rows
         ]
 
+    def get_expired_provider_cooldowns(self, now_iso: str = "") -> list:
+        """
+        Return cooldowns whose retry_after_at has passed.
+        The recovery worker uses this to clean up old cooldown rows.
+        """
+        now_iso = now_iso or datetime.utcnow().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT provider, model, reason, retry_after_at FROM provider_cooldowns "
+                "WHERE retry_after_at <= ? ORDER BY retry_after_at",
+                (now_iso,),
+            ).fetchall()
+        return [
+            {"provider": r[0], "model": r[1], "reason": r[2], "retry_after_at": r[3]}
+            for r in rows
+        ]
+
     def clear_provider_cooldown(self, provider: str, model: str = ""):
         """Remove the cooldown record for the given provider (and optionally model)."""
         with sqlite3.connect(self.db_path) as conn:
@@ -938,6 +955,26 @@ class Storage:
                     "DELETE FROM provider_cooldowns WHERE provider=?", (provider,)
                 )
             conn.commit()
+
+    def update_task_retry_after(self, task_id: str, new_retry_after_at: str):
+        """Push back retry_after_at for a paused task without changing other pause fields."""
+        now = datetime.utcnow().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE sdlc_tasks SET retry_after_at=?, updated_at=? WHERE id=? AND status='paused'",
+                (new_retry_after_at, now, task_id),
+            )
+            conn.commit()
+
+    def prune_expired_cooldowns(self, now_iso: str = "") -> int:
+        """Delete provider_cooldown rows whose retry_after_at has passed. Returns count deleted."""
+        now_iso = now_iso or datetime.utcnow().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "DELETE FROM provider_cooldowns WHERE retry_after_at <= ?", (now_iso,)
+            )
+            conn.commit()
+            return cursor.rowcount
 
     def get_next_role(self, current_role: str) -> Optional[str]:
         """ส่งคืน Role ถัดไปใน SDLC Workflow (ใช้ channel_config)"""

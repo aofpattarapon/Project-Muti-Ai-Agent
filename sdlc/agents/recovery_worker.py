@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""
+Recovery Worker — Quota-Aware Pause/Resume
+==========================================
+Polls paused SDLC tasks and requeues them once their cooldown expires.
+
+Does NOT execute tasks. Role agents pick up re-queued (pending) tasks on their
+next poll cycle and handle all Discord/Web notifications themselves.
+
+Tick logic (runs every RECOVERY_POLL_SECONDS, default 300):
+  1. list_paused_sdlc_tasks(now)  — tasks whose retry_after_at has passed
+     (manual_token_fix tasks are never returned — they stay paused until
+      an operator calls /resume or rotates the API key)
+  2. Cross-check active provider cooldowns:
+       - Exact match  (provider, model)  → model-specific cooldown
+       - Broad match  (provider, "")     → provider-wide cooldown
+     If still cooling: push task's retry_after_at forward to match cooldown, defer.
+  3. resume_paused_sdlc_task(task_id) → status='pending', all pause fields cleared
+  4. prune_expired_cooldowns()      — clean stale rows from provider_cooldowns table
+
+Usage:
+  python agents/recovery_worker.py                   # run forever
+  python agents/recovery_worker.py --run-now         # one tick and exit
+  python agents/recovery_worker.py --dry-run         # read-only tick and exit
+  RECOVERY_POLL_SECONDS=120 python agents/recovery_worker.py
+"""
+
+import os
+import sys
+import json
+import asyncio
+import logging
+import argparse
+import signal
+from datetime import datetime, timedelta
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
+if load_dotenv:
+    load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"), override=True)
+
+from shared.storage import Storage
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s %(name)s — %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("recovery_worker")
+
+DEFAULT_POLL_SECONDS = int(os.getenv("RECOVERY_POLL_SECONDS", "300"))
+
+# ─── History (in-memory + disk) ──────────────────────────────────────────────
+
+_tick_history: list[dict] = []
+MAX_HISTORY = 200
+
+
+def _flush_history():
+    try:
+        out_dir = Path(os.getenv("OUTPUT_BASE_PATH", "/app/outputs")) / "recovery"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        with open(out_dir / "tick_history.json", "w", encoding="utf-8") as f:
+            json.dump(_tick_history, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.debug(f"[Recovery] History flush failed: {e}")
+
+
+def _record_tick(stats: dict):
+    _tick_history.append(stats)
+    if len(_tick_history) > MAX_HISTORY:
+        _tick_history.pop(0)
+    _flush_history()
+
+
+# ─── Core recovery class ──────────────────────────────────────────────────────
+
+class RecoveryWorker:
+    """
+    Stateless recovery engine. Inject a Storage instance; call tick() repeatedly.
+    dry_run=True reads DB but writes nothing.
+    """
+
+    def __init__(self, storage: Storage, dry_run: bool = False):
+        self.storage = storage
+        self.dry_run = dry_run
+
+    async def tick(self) -> dict:
+        """
+        One recovery cycle.
+
+        Returns a stats dict:
+          {
+            "timestamp": "2026-05-20T14:00:00",
+            "requeued":  ["task-abc", ...],   # tasks moved to pending
+            "deferred":  ["task-xyz", ...],   # still in provider cooldown
+            "pruned":    3,                   # expired cooldown rows removed
+            "dry_run":   False,
+          }
+        """
+        now = datetime.utcnow().isoformat()
+
+        # 1. Tasks whose retry_after_at has passed (manual_token_fix excluded by storage)
+        ready_tasks = self.storage.list_paused_sdlc_tasks(now)
+
+        # 2. Build active cooldown index: (provider, model) → retry_after_at
+        active_cds: dict[tuple, str] = {
+            (cd["provider"], cd["model"]): cd["retry_after_at"]
+            for cd in self.storage.get_active_provider_cooldowns(now)
+        }
+
+        requeued: list[str] = []
+        deferred: list[str] = []
+
+        for task in ready_tasks:
+            cd_until = self._provider_cooldown_for(task, active_cds)
+
+            if cd_until:
+                # Provider still cooling — push task's deadline forward so it
+                # won't show up again until the provider cooldown also expires.
+                logger.info(
+                    f"[Recovery] Task {task.id} deferred — "
+                    f"provider '{task.pause_provider}' in cooldown until {cd_until[:19]}"
+                )
+                if not self.dry_run:
+                    self.storage.update_task_retry_after(task.id, cd_until)
+                deferred.append(task.id)
+            else:
+                logger.info(
+                    f"[Recovery] Task {task.id} requeued "
+                    f"({task.pause_reason} on '{task.pause_provider}')"
+                )
+                if not self.dry_run:
+                    self.storage.resume_paused_sdlc_task(task.id)
+                requeued.append(task.id)
+
+        # 3. Prune stale cooldown rows
+        pruned = 0
+        if not self.dry_run:
+            pruned = self.storage.prune_expired_cooldowns(now)
+
+        stats = {
+            "timestamp": now[:19],
+            "requeued":  requeued,
+            "deferred":  deferred,
+            "pruned":    pruned,
+            "dry_run":   self.dry_run,
+        }
+
+        if requeued or deferred or pruned:
+            logger.info(
+                f"[Recovery] tick done — "
+                f"requeued={len(requeued)} deferred={len(deferred)} pruned={pruned}"
+                + (" [DRY RUN]" if self.dry_run else "")
+            )
+
+        return stats
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _provider_cooldown_for(task, active_cds: dict) -> str:
+        """
+        Return the active cooldown deadline (ISO str) for this task's provider,
+        or "" if none applies.
+
+        Checks in order:
+          1. (provider, model)  — model-specific cooldown
+          2. (provider, "")     — provider-wide cooldown (model="")
+        If task.pause_provider is empty, no cooldown applies (return "").
+        """
+        if not task.pause_provider:
+            return ""
+        return (
+            active_cds.get((task.pause_provider, task.pause_model), "")
+            or active_cds.get((task.pause_provider, ""), "")
+        )
+
+
+# ─── Singleton storage ────────────────────────────────────────────────────────
+
+_storage_instance: Storage | None = None
+
+
+def _get_storage() -> Storage:
+    global _storage_instance
+    if _storage_instance is None:
+        _storage_instance = Storage()
+    return _storage_instance
+
+
+# ─── Run modes ────────────────────────────────────────────────────────────────
+
+async def run_once(dry_run: bool = False):
+    worker = RecoveryWorker(_get_storage(), dry_run=dry_run)
+    stats = await worker.tick()
+    _record_tick(stats)
+    label = "[DRY RUN] " if dry_run else ""
+    print(
+        f"{label}requeued={len(stats['requeued'])} "
+        f"deferred={len(stats['deferred'])} "
+        f"pruned={stats['pruned']}"
+    )
+    if stats["requeued"]:
+        print("  Requeued:", ", ".join(stats["requeued"]))
+    if stats["deferred"]:
+        print("  Deferred:", ", ".join(stats["deferred"]))
+
+
+async def run_forever(poll_seconds: int):
+    logger.info(f"✅ Recovery Worker running — poll every {poll_seconds}s (Ctrl+C to stop)")
+    worker = RecoveryWorker(_get_storage())
+
+    # Run immediately on startup
+    stats = await worker.tick()
+    _record_tick(stats)
+
+    while True:
+        await asyncio.sleep(poll_seconds)
+        stats = await worker.tick()
+        _record_tick(stats)
+
+
+# ─── Entry point ─────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="Recovery Worker — Quota-Aware Pause/Resume")
+    parser.add_argument(
+        "--run-now",
+        action="store_true",
+        help="Run one tick and exit",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Read-only tick — show what would be requeued without mutating DB",
+    )
+    parser.add_argument(
+        "--poll-seconds",
+        type=int,
+        default=DEFAULT_POLL_SECONDS,
+        help=f"Poll interval in seconds (default: {DEFAULT_POLL_SECONDS}, env: RECOVERY_POLL_SECONDS)",
+    )
+    args = parser.parse_args()
+
+    def _shutdown(sig, frame):
+        logger.info("🛑 Recovery Worker shutting down")
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+
+    if args.run_now or args.dry_run:
+        asyncio.run(run_once(dry_run=args.dry_run))
+    else:
+        logger.info(f"🤖 Recovery Worker starting (poll={args.poll_seconds}s)")
+        asyncio.run(run_forever(args.poll_seconds))
+
+
+if __name__ == "__main__":
+    main()
