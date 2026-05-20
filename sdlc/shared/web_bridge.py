@@ -112,6 +112,37 @@ class WebAppBridge:
 
     # ─── Public Event Methods ──────────────────────────────────────────────────
 
+    async def post_event(
+        self,
+        role_key: str,
+        event_type: str,
+        task_name: str,
+        status: str,
+        summary: str,
+        sdlc_task_id: str = "",
+        project_id: str = "",
+        metadata: Optional[dict] = None,
+        actor: str = "",
+    ) -> bool:
+        """
+        Generic audit/lifecycle ingest event — for agent.task.paused,
+        agent.task.resumed.auto, agent.task.resumed.discord, etc.
+        Writes to agent_activity_logs via /api/agent-activity/ingest.
+        """
+        meta = dict(metadata or {})
+        if actor:
+            meta["actor"] = actor
+        return await self._post({
+            "roleKey":      role_key,
+            "eventType":    event_type,
+            "taskName":     task_name,
+            "status":       status,
+            "summary":      summary,
+            "sdlc_task_id": sdlc_task_id,
+            "project_id":   project_id,
+            "metadata":     meta,
+        })
+
     async def task_started(
         self,
         role_key: str,

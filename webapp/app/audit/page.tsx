@@ -17,6 +17,10 @@ const EVENT_TYPE_OPTIONS = [
   { value: "password_reset.rejected", label: "Password reset rejected" },
   { value: "user.status_changed", label: "User status changed" },
   { value: "user.role_changed", label: "User role changed" },
+  { value: "agent.task.paused", label: "Task paused (agent)" },
+  { value: "agent.task.resumed.auto", label: "Task resumed (auto)" },
+  { value: "agent.task.resumed.discord", label: "Task resumed (Discord)" },
+  { value: "agent.task.resumed.web", label: "Task resumed (web operator)" },
 ];
 
 const PAGE_SIZE = 10;

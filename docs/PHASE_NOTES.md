@@ -40,7 +40,16 @@
       webapp/app/recovery/_components/ResumeButton.tsx: "use client" — POSTs to resume API
       webapp/app/_components/app-shell.tsx: Recovery nav link in System group
       14 tests (including resumed-task exclusion test) — 129 total TypeScript tests green
-  - Next: 9.3 Audit Trail → 9.4 hermes3 hardening
+  - 9.3 COMPLETE: Agent pause/resume audit trail
+      Python: WebAppBridge.post_event() — generic ingest method for agent.task.* events
+      Python: BaseAgent._pause_task_for_quota() emits agent.task.paused; !sdlc_resume emits agent.task.resumed.discord
+      Python: RecoveryWorker.tick() emits agent.task.resumed.auto on auto-requeue (dry_run skips)
+      webapp/lib/audit/events.ts: AuditEventType += agent.task.paused, agent.task.resumed.auto, agent.task.resumed.discord
+      webapp/app/audit/page.tsx: EVENT_TYPE_OPTIONS += all agent.task.* types
+      sdlc/tests/test_phase9_audit_trail.py: 7 Python tests (bridge post_event + recovery worker events) — all green
+      webapp/tests/runtime-phase9.test.ts: +3 TypeScript tests for recordAuditEvent — 17 total (all green)
+      All 132 TypeScript + 18 Phase 9 Python tests green
+  - Next: 9.4 hermes3 hardening
 
   Roadmap: docs/PHASE9_ROADMAP.md
 

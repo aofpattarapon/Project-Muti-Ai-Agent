@@ -20,6 +20,9 @@ export type AuditEventType =
   | "system_config.deleted"
   | "settings.saved"
   | "settings.restart"
+  | "agent.task.paused"
+  | "agent.task.resumed.auto"
+  | "agent.task.resumed.discord"
   | "agent.task.resumed.web";
 
 export type AuditEvent = {

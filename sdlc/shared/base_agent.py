@@ -617,6 +617,16 @@ class BaseAgent(ABC):
                 f"▶️ Resumed `{task_id}` (`{t.task_type}`){policy_note}\n"
                 f"Status → `pending` — bot จะ pick up ใน poll loop ถัดไป (~15s)"
             )
+            await get_bridge().post_event(
+                role_key=self.role_name,
+                event_type="agent.task.resumed.discord",
+                task_name=t.task_type or task_id,
+                status="pending",
+                summary=f"Task {task_id} manually resumed via Discord.",
+                sdlc_task_id=task_id,
+                project_id=t.project_id if hasattr(t, "project_id") else "",
+                actor=str(ctx.author),
+            )
 
     # ─── Approval Handling ─────────────────────────────────────────
 
@@ -1933,7 +1943,29 @@ class BaseAgent(ABC):
             ),
         )
 
-        # 5. Close timelog
+        # 5. Audit trail — agent.task.paused (separate from task_completed above)
+        await get_bridge().post_event(
+            role_key=self.role_name,
+            event_type="agent.task.paused",
+            task_name=task.title or task.id,
+            status="paused",
+            summary=(
+                f"Task {task.id} paused: {err_info.error_type} on "
+                f"{provider or model_key}. Resume after {retry_after_at[:19]} UTC."
+            ),
+            sdlc_task_id=task.id,
+            project_id=task.project_id,
+            metadata=dict(
+                pause_reason=err_info.error_type,
+                pause_provider=provider,
+                pause_model=model_key,
+                retry_after_at=retry_after_at,
+                resume_policy=err_info.resume_policy,
+            ),
+            actor="system",
+        )
+
+        # 6. Close timelog
         self.timelog.finish(
             log_id=log_id,
             model_used=actual_model,

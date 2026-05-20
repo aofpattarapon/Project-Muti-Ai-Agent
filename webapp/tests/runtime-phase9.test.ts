@@ -17,6 +17,7 @@ import { POST as resumePost } from "@/app/api/runtime/paused-tasks/[sdlcTaskId]/
 import { GET as cooldownsGet } from "@/app/api/runtime/cooldowns/route";
 import { GET as recoveryGet } from "@/app/api/runtime/recovery/route";
 import { db } from "@/lib/db";
+import { recordAuditEvent } from "@/lib/audit/events";
 
 vi.mock("@/lib/auth/session");
 
@@ -251,6 +252,34 @@ describe("GET /api/runtime/cooldowns", () => {
     expect(body.pausedCount).toBe(2);
     expect(body.cooldowns).toHaveLength(1);
     expect(body.cooldowns[0].provider).toBe("groq");
+  });
+});
+
+// ─── Audit event types — Phase 9.3 ──────────────────────────────────────────
+
+describe("audit event types — agent.task.*", () => {
+  test("recordAuditEvent accepts agent.task.paused", () => {
+    expect(() =>
+      recordAuditEvent("agent.task.paused", "Task task-abc paused: rate_limited.", "system"),
+    ).not.toThrow();
+
+    const row = db
+      .prepare(`SELECT type, actor FROM audit_events WHERE type = 'agent.task.paused' ORDER BY id DESC LIMIT 1`)
+      .get() as { type: string; actor: string } | undefined;
+    expect(row?.type).toBe("agent.task.paused");
+    expect(row?.actor).toBe("system");
+  });
+
+  test("recordAuditEvent accepts agent.task.resumed.auto", () => {
+    expect(() =>
+      recordAuditEvent("agent.task.resumed.auto", "Task task-abc auto-requeued.", "recovery_worker"),
+    ).not.toThrow();
+  });
+
+  test("recordAuditEvent accepts agent.task.resumed.discord", () => {
+    expect(() =>
+      recordAuditEvent("agent.task.resumed.discord", "Task resumed via Discord.", "Off#1234"),
+    ).not.toThrow();
   });
 });
 

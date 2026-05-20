@@ -45,6 +45,7 @@ if load_dotenv:
     load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"), override=True)
 
 from shared.storage import Storage
+from shared.web_bridge import get_bridge
 
 logging.basicConfig(
     level=logging.INFO,
@@ -163,6 +164,23 @@ class RecoveryWorker:
                 )
                 if not self.dry_run:
                     self.storage.resume_paused_sdlc_task(task.id)
+                    await get_bridge().post_event(
+                        role_key=task.role or "system",
+                        event_type="agent.task.resumed.auto",
+                        task_name=task.title or task.id,
+                        status="pending",
+                        summary=(
+                            f"Task {task.id} auto-requeued by recovery worker: "
+                            f"{task.pause_reason} cooldown expired."
+                        ),
+                        sdlc_task_id=task.id,
+                        project_id=task.project_id,
+                        metadata=dict(
+                            pause_reason=task.pause_reason,
+                            pause_provider=task.pause_provider,
+                        ),
+                        actor="recovery_worker",
+                    )
                 requeued.append(task.id)
 
         # 3. Prune stale cooldown rows
