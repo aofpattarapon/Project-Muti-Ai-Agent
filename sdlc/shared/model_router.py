@@ -19,12 +19,15 @@ import os
 import re
 import json
 import time
+import logging
 import sqlite3
 from datetime import date, datetime
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Optional
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Model Tiers ─────────────────────────────────────────────────
@@ -239,6 +242,8 @@ def best_free_for_role(
     if not best_key:
         best_key = "ollama/hermes3"
         best_cfg = MODELS["ollama/hermes3"]
+        if "ollama" in exclude_providers:
+            logger.warning("[Router] WARNING: hermes3 last-resort used despite ollama cooldown")
 
     return best_key, best_cfg
 
@@ -728,6 +733,8 @@ class ModelRouter:
             selected_key    = "ollama/hermes3"
             selected_config = MODELS["ollama/hermes3"]
             actual_tier     = ModelTier.FREE
+            if "ollama" in cooldown_providers:
+                logger.warning("[Router] WARNING: hermes3 last-resort used despite ollama cooldown")
 
         te = tier_emoji_map.get(actual_tier, "?")
         task_label = f" task={task_type}" if task_type else ""

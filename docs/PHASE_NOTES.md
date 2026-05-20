@@ -49,7 +49,13 @@
       sdlc/tests/test_phase9_audit_trail.py: 7 Python tests (bridge post_event + recovery worker events) — all green
       webapp/tests/runtime-phase9.test.ts: +3 TypeScript tests for recordAuditEvent — 17 total (all green)
       All 132 TypeScript + 18 Phase 9 Python tests green
-  - Next: 9.4 hermes3 hardening
+  - 9.4 COMPLETE: hermes3 last-resort cooldown hardening
+      model_router.py: added module-level logger; warning-only (not skip) when hermes3 fallback fires
+        - best_free_for_role() warns if "ollama" in exclude_providers at ultimate fallback
+        - ModelRouter.route() warns if "ollama" in cooldown_providers at last-resort
+      Warning message: "[Router] WARNING: hermes3 last-resort used despite ollama cooldown"
+      sdlc/tests/test_phase9_model_router.py: 6 tests (best_free_for_role + route() last-resort) — all green
+  - Next: Phase 9 finalization
 
   Roadmap: docs/PHASE9_ROADMAP.md
 
