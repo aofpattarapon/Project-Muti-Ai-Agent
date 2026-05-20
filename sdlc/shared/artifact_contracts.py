@@ -85,12 +85,15 @@ _CONTRACTS: dict[str, dict[str, dict]] = {
         },
         "project_management_plan": {
             "sections": [
-                {"name": "schedule", "aliases": ["schedule", "ตารางเวลา", "timeline"]},
+                {"name": "schedule", "aliases": ["schedule", "ตารางเวลา", "timeline", "แผนเวลา", "project schedule"]},
                 {"name": "resources", "aliases": ["resource", "ทรัพยากร"]},
                 {"name": "milestone", "aliases": ["milestone"]},
             ],
             "secondary_files": [],
-            "prompt_hint": "Required: schedule, resources, milestone.",
+            "prompt_hint": (
+                "Required: schedule/timeline/ตารางเวลา/แผนเวลา section, resources, milestone. "
+                "Every milestone row must have a concrete date or week number."
+            ),
         },
         "raci_matrix": {
             "sections": [
@@ -103,11 +106,15 @@ _CONTRACTS: dict[str, dict[str, dict]] = {
         "risk_register": {
             "sections": [
                 {"name": "risk_id", "aliases": ["risk-", "RISK-", "ความเสี่ยง", "R-"]},
-                {"name": "probability", "aliases": ["probability", "likelihood", "โอกาส"]},
-                {"name": "mitigation", "aliases": ["mitigation", "มาตรการ"]},
+                {"name": "probability", "aliases": ["probability", "likelihood", "โอกาส", "ความน่าจะเป็น", "โอกาสที่จะเกิด"]},
+                {"name": "mitigation", "aliases": ["mitigation", "มาตรการ", "มาตรการลดความเสี่ยง", "แผนลดความเสี่ยง", "แผนรับมือ"]},
             ],
             "secondary_files": [],
-            "prompt_hint": "Required: Risk IDs, probability, mitigation actions.",
+            "prompt_hint": (
+                "Required: Risk IDs (RISK-NNN), probability/โอกาส column, "
+                "mitigation/แผนลดความเสี่ยง action per risk. "
+                "Every risk row must have a non-empty mitigation — not just a heading."
+            ),
         },
         "communications_plan": {
             "sections": [

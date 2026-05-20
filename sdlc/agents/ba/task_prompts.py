@@ -75,12 +75,19 @@ PROMPTS = {
 | Business | ... |
 | Regulatory | ... |
 
-## 7. Dependencies
+## 7. Safety & Compliance Requirements
+| Req ID | ประเภท | ข้อกำหนด | เหตุผล |
+|--------|-------|---------|------|
+| SAFETY-001 | Safety Boundary | ระบุข้อจำกัดด้านความปลอดภัยหลักของระบบ (เช่น simulation-only, no real API calls) | ป้องกันความเสียหาย |
+
+*(ถ้าโปรเจคเป็น trading/financial simulation: ต้องระบุชัดเจนว่า ห้าม real order execution, ห้าม real exchange API calls, ทุก order เป็น paper/simulated fills เท่านั้น, ต้องมี PAPER_TRADING_MODE flag)*
+
+## 8. Dependencies
 | Dependency | ประเภท | ผลกระทบ |
 |-----------|-------|--------|
 | ... | Internal/External | ... |
 
-## 8. Acceptance Criteria
+## 9. Acceptance Criteria
 | FR-ID | เกณฑ์การยอมรับ |
 |-------|--------------|
 | FR-001 | Given ... When ... Then ... |
@@ -173,8 +180,15 @@ PROMPTS = {
 | Performance | Response time | < 2 วินาที |
 | Scalability | Concurrent users | 1,000 |
 | Security | Authentication | JWT / OAuth2 |
+| Safety | (ถ้า trading/simulation) Paper-mode only — ห้าม real order execution | PAPER_TRADING_MODE=true เสมอ |
 
-## 6. Validation Requirements
+## 6. Security & Safety Requirements
+| SRS-ID | ข้อกำหนด | Priority |
+|--------|---------|---------|
+| SEC-001 | ระบบต้องป้องกัน injection/XSS ทุก input | Critical |
+| SEC-002 | (ถ้า financial) ห้ามเก็บ API key/secret ของ exchange จริงใน plaintext | Critical |
+
+## 7. Validation Requirements
 | SRS-ID | เงื่อนไขทดสอบ |
 |--------|------------|
 | SRS-001 | TC-001 ถึง TC-005 |

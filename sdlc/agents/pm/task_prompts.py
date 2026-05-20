@@ -91,10 +91,16 @@ PROMPTS = {
 ## 2. ขอบเขตโครงการ
 ...
 
-## 3. Milestone List
-| # | Milestone | วันที่ | เกณฑ์เสร็จ | สถานะ |
-|---|----------|------|----------|------|
-| 1 | Kick-off | ... | ... | Planned |
+## 3. Project Schedule / ตารางเวลาโครงการ
+**ระบุ schedule ที่ชัดเจน ห้ามใช้ '...' หรือ 'TBD' แทนวันที่จริง — ใช้ "สัปดาห์ที่ N" หรือ "YYYY-MM-DD" เสมอ**
+
+| # | Milestone | สัปดาห์/วันที่เริ่ม | สัปดาห์/วันที่เสร็จ | Owner | ผลลัพธ์ที่คาดหวัง | Dependency | สถานะ |
+|---|----------|-----------------|----------------|-------|----------------|-----------|------|
+| 1 | Kick-off & Requirements | สัปดาห์ที่ 1 | สัปดาห์ที่ 1 | CEO/PM | Project Charter approved | - | Planned |
+| 2 | Analysis & Design | สัปดาห์ที่ 1 | สัปดาห์ที่ 2 | BA/SA/UXUI | BRD, SRS, Architecture, Wireframe | Milestone 1 | Planned |
+| 3 | Development | สัปดาห์ที่ 2 | สัปดาห์ที่ 3 | DEV | Frontend + Backend code | Milestone 2 | Planned |
+| 4 | QA & Testing | สัปดาห์ที่ 3 | สัปดาห์ที่ 4 | QA | Test Report, Defects resolved | Milestone 3 | Planned |
+| 5 | Deployment & Release | สัปดาห์ที่ 4 | สัปดาห์ที่ 4 | DevOps | System live, Deployment Guide | Milestone 4 | Planned |
 
 ## 4. Work Breakdown Structure (WBS)
 ```
@@ -221,6 +227,13 @@ RACI: R=Responsible (ผู้ทำ), A=Accountable (ผู้รับผิ�
 
 ## สิ่งที่ต้องส่งมอบ: risk_register.md
 สร้าง **Risk Register** ภาษาไทย
+
+**ข้อบังคับ:** ทุกแถวใน Risk Register ต้องมีคอลัมน์ "แผนลดความเสี่ยง" ที่มีเนื้อหาจริง — ห้ามว่างเปล่า ห้ามใส่ "..." หรือ "-" เพียงอย่างเดียว
+**ข้อบังคับ:** ถ้าโปรเจคนี้เกี่ยวข้องกับระบบการเงิน, trading, simulation ให้เพิ่ม safety risks เหล่านี้ด้วย:
+- การสั่ง order จริง (accidental real order execution) แทน paper trade
+- API secret/key ของ exchange รั่วไหล
+- PAPER_TRADING_MODE flag ถูกปิดโดยไม่ตั้งใจ
+- ระบบ simulation คำนวณ balance ผิดพลาด
 
 ---
 # Risk Register — {project_name}

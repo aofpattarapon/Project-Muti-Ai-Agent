@@ -346,6 +346,9 @@ LOCAL_CONTEXT_LIMITS: dict[str, int] = {
     "ollama/deepseek-r1":    6500,
     "groq/llama-3.1-8b":     7000,
     "groq/llama-3.3-70b":   30000,
+    # Conservative Groq free-tier limits (actual context larger, but payload size caps apply)
+    "groq/qwen3-32b":        25000,
+    "groq/llama-4-scout":    60000,  # 128K context, but 60K conservative for free-tier
 }
 
 # task_type → local model ที่เริ่มใช้ก่อนเสมอ (bypass score routing)

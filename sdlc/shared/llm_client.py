@@ -17,6 +17,11 @@ from shared.model_router import (
 )
 
 
+# Groq pre-flight payload guard: reject before HTTP call to avoid 413 errors.
+# ~100K chars ≈ 25K tokens — conservative for free-tier rate limits.
+GROQ_MAX_PAYLOAD_CHARS = 100_000
+
+
 class LLMProvider(str, Enum):
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
@@ -93,7 +98,11 @@ class LLMClient:
             # ── Multi-step fallback chain on quota/auth/timeout ──────────
             # Chain: primary → claude-cli → gpt-4o-mini → hermes3 (never stops)
             err_str = str(primary_err).lower()
-            is_retriable = any(k in err_str for k in (
+            # 413 = provider rejected payload as too large — route to a different provider
+            is_payload_too_large = any(k in err_str for k in (
+                "413", "payload too large", "request entity too large", "request too large",
+            ))
+            is_retriable = is_payload_too_large or any(k in err_str for k in (
                 "401", "429", "quota", "credit", "billing",
                 "unauthorized", "rate limit", "timeout", "timedout",
                 "connection", "connect", "eof", "broken pipe",
@@ -119,6 +128,10 @@ class LLMClient:
             fallback_tried = False
             _last_err_str = str(primary_err).lower()
 
+            # 413: exclude the failing provider — it rejected the payload size.
+            # Retrying with another model from the same provider will produce the same error.
+            _payload_reject_provider: str = self.config.provider if is_payload_too_large else ""
+
             # If role is known, build score-ranked fallback list
             if role:
                 # Get all FREE models sorted by score for this role, excluding already tried
@@ -131,6 +144,7 @@ class LLMClient:
                     if cfg.tier == _MT.FREE
                     and cfg.provider in available_providers
                     and k not in tried_keys
+                    and cfg.provider != _payload_reject_provider
                 ]
                 free_candidates.sort(key=lambda x: x[2], reverse=True)
                 # Append cheap models as last resort
@@ -140,6 +154,7 @@ class LLMClient:
                     if cfg.tier == _MT.CHEAP
                     and cfg.provider in available_providers
                     and k not in tried_keys
+                    and cfg.provider != _payload_reject_provider
                     and (cfg.provider != "openai" or os.getenv("OPENAI_API_KEY"))
                 ]
                 cheap_candidates.sort(key=lambda x: x[2], reverse=True)
@@ -322,6 +337,14 @@ class LLMClient:
 
     async def _call_groq(self, system: str, user: str, max_tokens: int) -> str:
         """Groq API — supports Llama3, Qwen3, Llama4 Scout (Free Tier)"""
+        # Pre-flight size guard: check before API key so routing kicks in immediately
+        total_chars = len(system) + len(user)
+        if total_chars > GROQ_MAX_PAYLOAD_CHARS:
+            raise ValueError(
+                f"413 Payload too large for Groq: {total_chars} chars "
+                f"(limit ~{GROQ_MAX_PAYLOAD_CHARS}) — re-routing to non-Groq model"
+            )
+
         api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
             raise ValueError("GROQ_API_KEY not set")
