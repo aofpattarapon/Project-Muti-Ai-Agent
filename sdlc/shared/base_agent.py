@@ -549,6 +549,7 @@ class BaseAgent(ABC):
             status_icon = {
                 "pending": "⏳", "in_progress": "🔄", "completed": "✅",
                 "waiting_approval": "🕐", "approved": "✅", "rejected": "❌", "failed": "💥",
+                "paused": "⏸️",
             }
             for t in tasks[:15]:
                 icon = status_icon.get(t.status, "❓")
@@ -559,6 +560,63 @@ class BaseAgent(ABC):
                     inline=True,
                 )
             await ctx.send(embed=embed)
+
+        @self.bot.command(name="sdlc_paused")
+        async def sdlc_paused_cmd(ctx):
+            """List all paused SDLC tasks across all roles: !sdlc_paused"""
+            now = datetime.utcnow().isoformat()
+            # Fetch both ready-to-resume and still-waiting paused tasks
+            ready = self.storage.list_paused_sdlc_tasks(now)
+            # All paused (no time filter) by querying directly
+            import sqlite3 as _sqlite3
+            with _sqlite3.connect(self.storage.db_path) as _conn:
+                _all_rows = _conn.execute(
+                    "SELECT * FROM sdlc_tasks WHERE status='paused' ORDER BY paused_at DESC LIMIT 20"
+                ).fetchall()
+            all_paused = [self.storage._row_to_sdlc_task(r) for r in _all_rows]
+            if not all_paused:
+                await ctx.send("✅ ไม่มี tasks ที่ถูก pause อยู่ตอนนี้")
+                return
+            ready_ids = {t.id for t in ready}
+            embed = discord.Embed(
+                title="⏸️ Paused SDLC Tasks",
+                color=0xFFA500,
+                description=f"Total: {len(all_paused)} paused task(s)",
+            )
+            for t in all_paused[:10]:
+                status_line = "🟢 Ready to resume" if t.id in ready_ids else f"⏳ Retry after: {t.retry_after_at[:19] if t.retry_after_at else 'N/A'} UTC"
+                policy = " ⚠️ MANUAL" if t.resume_policy == "manual_token_fix" else ""
+                embed.add_field(
+                    name=f"`{t.id}` [{t.role.upper()}]{policy}",
+                    value=(
+                        f"**Reason:** {t.pause_reason}\n"
+                        f"**Provider:** {t.pause_provider or 'unknown'} / `{t.pause_model or 'unknown'}`\n"
+                        f"{status_line}"
+                    ),
+                    inline=False,
+                )
+            embed.set_footer(text="Use !sdlc_resume <task_id> to manually resume a manual_token_fix task")
+            await ctx.send(embed=embed)
+
+        @self.bot.command(name="sdlc_resume")
+        async def sdlc_resume_cmd(ctx, task_id: str = None):
+            """Manually resume a paused task (use for manual_token_fix after rotating API key): !sdlc_resume <task_id>"""
+            if not task_id:
+                await ctx.send("❌ ใส่ task_id: `!sdlc_resume <task_id>`")
+                return
+            t = self.storage.get_sdlc_task(task_id)
+            if not t:
+                await ctx.send(f"❌ ไม่พบ task `{task_id}`")
+                return
+            if t.status != "paused":
+                await ctx.send(f"❌ Task `{task_id}` ไม่ได้อยู่ใน status paused (ปัจจุบัน: `{t.status}`)")
+                return
+            self.storage.resume_paused_sdlc_task(task_id)
+            policy_note = " (manual_token_fix — ตรวจสอบ API key แล้ว)" if t.resume_policy == "manual_token_fix" else ""
+            await ctx.send(
+                f"▶️ Resumed `{task_id}` (`{t.task_type}`){policy_note}\n"
+                f"Status → `pending` — bot จะ pick up ใน poll loop ถัดไป (~15s)"
+            )
 
     # ─── Approval Handling ─────────────────────────────────────────
 

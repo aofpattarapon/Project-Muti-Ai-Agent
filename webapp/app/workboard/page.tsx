@@ -33,6 +33,7 @@ const STATUS_BADGE: Record<string, string> = {
   rejected:         "bg-red-500/20 text-red-300",
   completed:        "bg-violet-500/20 text-violet-300",
   blocked:          "bg-red-700/20 text-red-400",
+  paused:           "bg-yellow-600/20 text-yellow-300",
 };
 
 function buildProjectCards() {
