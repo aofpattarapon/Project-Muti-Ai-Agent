@@ -1,12 +1,22 @@
 # Multi-Agent AI Phase Notes
 
   Current status:
-  - Last verified commit: c1e663b Phase 7.2
-  - Phase 7 / 7.1 / 7.2 passed review
-  - Contract validation, retry persistence, secondary artifact freshness are complete
+  - Last verified commit: fc12447 Phase 8.3
+  - Phase 8 / 8.0 / 8.1 / 8.2 / 8.3 passed — all 599 Python + 115 TypeScript tests green
+
+  Phase 8 complete summary:
+  - 8.0: llm_error_classifier.py + DB pause schema (pause_reason/provider/model/retry_after_at)
+         + provider_cooldowns table + 6 storage methods
+  - 8.1: BaseAgent._pause_task_for_quota() — wraps LLM call, classifies error, pauses task
+         + WebBridge.extra_metadata param
+  - 8.2: agents/recovery_worker.py — tick() polls paused tasks, cross-checks provider cooldowns
+         requeues or defers, prunes expired cooldown rows; PM2 config already has sdlc-quota-recovery
+         + Storage.update_task_retry_after() + Storage.prune_expired_cooldowns()
+  - 8.3: Discord !sdlc_paused + !sdlc_resume commands (all roles)
+         Web App STATUS_BADGE: paused → yellow badge
 
   Next phase:
-  - Phase 8: Quota-Aware Pause/Resume Recovery Worker
+  - Phase 9: TBD (decide with user)
 
   Important concept:
   - Discord is primary runtime
@@ -740,3 +750,53 @@
       3 files changed, 472 insertions(+), 9 deletions(-)
       create mode 100644 sdlc/tests/test_phase8_pause_integration.py
   ⎿  You're out of usage credits · resets 1:20am (Asia/Bangkok)
+
+## 2026-05-20 Continuation
+
+Yesterday's stopping point:
+- Phase 8.0 committed as `a8f0c06`
+  - added provider-agnostic LLM error classifier
+  - added pause metadata columns and provider cooldown table
+  - added storage APIs for pause/resume/cooldown behavior
+- Phase 8.1 committed as `0fce75b`
+  - BaseAgent catches quota/rate/context/auth/provider errors from LLM calls
+  - quota/provider errors pause SDLC tasks instead of consuming retry budget
+  - WebAppBridge supports `extra_metadata`
+  - paused events sync to the web app with `status=paused`
+- Last checked suite at that point:
+  - 588 Python tests passed
+  - 115 TypeScript tests passed
+
+Phase 8.2 implemented today:
+- Added `sdlc/agents/recovery_worker.py`
+  - worker only requeues paused tasks whose `retry_after_at` has passed
+  - worker never claims or executes SDLC tasks
+  - `manual_token_fix` pauses remain excluded from auto-resume
+  - active provider cooldowns defer task resume and push `retry_after_at` forward
+  - expired provider cooldown rows are pruned
+- Added router cooldown avoidance in `sdlc/shared/model_router.py`
+  - active provider/model cooldowns are skipped during task-type routing
+  - active provider/model cooldowns are skipped during score-based routing
+  - budget fallback also respects cooldown exclusions
+- Added `Storage.get_expired_provider_cooldowns()`
+- Registered the worker in:
+  - `sdlc/ecosystem.bots.config.js` as `sdlc-quota-recovery`
+  - `sdlc/docker-compose.yml` as `quota-recovery`
+  - `sdlc/scripts/start_pm2.sh` so `--no-cron` still includes quota recovery
+- Added `sdlc/tests/test_phase8_recovery_worker.py`
+
+Verification on 2026-05-20:
+- `python3 sdlc/tests/test_phase8_recovery_worker.py` — 11 passed
+- `python3 sdlc/tests/test_phase8_classifier_db.py` — 67 passed
+- `python3 sdlc/tests/test_phase8_pause_integration.py` — 20 passed
+- `python3 sdlc/tests/test_artifact_contracts.py` — 82 passed
+- `python3 sdlc/tests/test_artifact_validator.py` — 50 passed
+- `python3 sdlc/tests/test_runtime_correctness.py` — 29 passed
+- `python3 sdlc/tests/test_web_sync.py` — 53 passed
+- `python3 sdlc/tests/test_dev_workspace.py` — 98 passed
+- `python3 sdlc/tests/test_devops_execution.py` — 122 passed
+- `python3 sdlc/tests/test_test_runner.py` — 67 passed
+- `npm test` in `webapp/` — 19 files / 115 tests passed
+- `python3 -m pytest sdlc/tests` was not available because `pytest` is not installed in the system Python.
+- Local worker smoke test passed with explicit DB path:
+  `DB_PATH=/home/off_poff_p/projects/multi-ai-agent/sdlc/data/sdlc.db OUTPUT_BASE_PATH=/tmp/sdlc_outputs python3 agents/recovery_worker.py --run-now`
