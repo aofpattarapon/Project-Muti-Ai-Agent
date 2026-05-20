@@ -68,16 +68,22 @@ class CEOAgent(BaseAgent):
 
         @bot.command(name="new")
         async def new_project(ctx, *, requirements: str = None):
-            """สร้าง Project ใหม่ด้วย single command"""
-            if not requirements:
+            """สร้าง Project ใหม่ด้วย single command (รองรับ attachment .txt/.md/.csv/.xlsx)"""
+            from shared.attachment_intake import gather_intake, SUPPORTED_EXTS
+            combined, warnings = await gather_intake(ctx.message, requirements or "")
+            if not combined.strip():
                 await ctx.send(
                     "❌ กรุณาใส่ Requirement:\n"
                     "`!new [ชื่อโปรเจค] | [คำอธิบาย] | [เป้าหมาย]`\n\n"
+                    "หรือแนบไฟล์ พร้อม `!new` "
+                    f"(รองรับ: {', '.join(sorted(SUPPORTED_EXTS))})\n\n"
                     "ตัวอย่าง:\n"
                     "`!new Trading Bot AI | ระบบ AI วิเคราะห์ตลาด crypto | เพิ่ม ROI 20%`"
                 )
                 return
-            await self._start_project_from_text(ctx, requirements)
+            for w in warnings:
+                await ctx.send(w)
+            await self._start_project_from_text(ctx, combined)
 
 
     async def _interactive_project_start(self, ctx):
@@ -99,18 +105,23 @@ class CEOAgent(BaseAgent):
 
         try:
             response = await ctx.bot.wait_for("message", check=check, timeout=300)
-            await self._start_project_from_text(ctx, response.content)
+            from shared.attachment_intake import gather_intake
+            combined, warnings = await gather_intake(response, response.content)
+            for w in warnings:
+                await ctx.send(w)
+            await self._start_project_from_text(ctx, combined)
         except Exception:
             await ctx.send("⏰ Timeout - กรุณาลองใหม่")
 
     async def _start_project_from_text(self, ctx, requirements_text: str):
         """สร้าง Project จาก text requirements"""
         # B2: Hard cap — prevent DB bloat + LLM context overflow
-        _MAX_REQ_CHARS = 8000
+        # Raised to 25k to accommodate attachment intake (gather_intake already enforces this limit)
+        _MAX_REQ_CHARS = 25_000
         if len(requirements_text) > _MAX_REQ_CHARS:
             await ctx.send(
                 f"⚠️ Requirements text ยาวเกินไป ({len(requirements_text):,} chars)\n"
-                f"ระบบจะใช้แค่ {_MAX_REQ_CHARS:,} chars แรก — กรุณากระชับ requirement ให้สั้นลง"
+                f"ระบบจะใช้แค่ {_MAX_REQ_CHARS:,} chars แรก"
             )
             requirements_text = requirements_text[:_MAX_REQ_CHARS]
 

@@ -120,4 +120,20 @@
         Symptom: PM Agent — Complete posted to Discord even though no PM work was done
     sdlc/tests/test_hotfix_legacy_guard.py: 6 tests (legacy guard + process_task stub) — all green
 
+  Feature: CEO attachment intake (.txt / .md / .csv / .xlsx)
+    sdlc/shared/attachment_intake.py: new helper module
+      parse_bytes(data, filename) → AttachmentResult — sync, safe to test
+      gather_intake(message, inline_text) → (combined, warnings) — async, Discord-compatible
+      Limits: 4 MB per file, 15k chars per parsed attachment, 25k total combined
+      .txt/.md: UTF-8 with latin-1 fallback
+      .csv: pipe-delimited rows
+      .xlsx: openpyxl (graceful ImportError if not installed)
+      .xls: rejected with conversion hint; unsupported extensions rejected clearly
+    sdlc/agents/ceo/agent.py:
+      !new command: calls gather_intake(ctx.message, inline_text) — merges text + attachments
+      _interactive_project_start: calls gather_intake(response, response.content)
+      _MAX_REQ_CHARS raised 8k → 25k to match MAX_TOTAL_CHARS
+    sdlc/tests/test_attachment_intake.py: 24 tests — all green
+    Image (PNG/JPG) and PDF support deferred to a future phase (OCR/vision dependency)
+
   Next: Phase 10 TBD
