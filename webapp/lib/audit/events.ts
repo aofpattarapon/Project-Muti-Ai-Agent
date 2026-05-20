@@ -19,7 +19,8 @@ export type AuditEventType =
   | "system_config.updated"
   | "system_config.deleted"
   | "settings.saved"
-  | "settings.restart";
+  | "settings.restart"
+  | "agent.task.resumed.web";
 
 export type AuditEvent = {
   type: AuditEventType;

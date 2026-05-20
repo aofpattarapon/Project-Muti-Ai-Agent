@@ -71,11 +71,35 @@ def _flush_history():
         logger.debug(f"[Recovery] History flush failed: {e}")
 
 
-def _record_tick(stats: dict):
+def _write_runtime_status(stats: dict, paused_count: int, ready_count: int, cooldowns: list):
+    """Write runtime_status.json — read by /api/runtime/cooldowns and /api/runtime/recovery."""
+    try:
+        out_dir = Path(os.getenv("OUTPUT_BASE_PATH", "/app/outputs")) / "recovery"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        status = {
+            "last_tick": stats["timestamp"],
+            "worker_alive": True,
+            "paused_count": paused_count,
+            "ready_to_resume_count": ready_count,
+            "cooldowns": cooldowns,
+            "last_stats": {
+                "requeued": stats["requeued"],
+                "deferred": stats["deferred"],
+                "pruned": stats["pruned"],
+            },
+        }
+        with open(out_dir / "runtime_status.json", "w", encoding="utf-8") as f:
+            json.dump(status, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.debug(f"[Recovery] runtime_status write failed: {e}")
+
+
+def _record_tick(stats: dict, paused_count: int = 0, ready_count: int = 0, cooldowns: list = None):
     _tick_history.append(stats)
     if len(_tick_history) > MAX_HISTORY:
         _tick_history.pop(0)
     _flush_history()
+    _write_runtime_status(stats, paused_count, ready_count, cooldowns or [])
 
 
 # ─── Core recovery class ──────────────────────────────────────────────────────
@@ -107,11 +131,13 @@ class RecoveryWorker:
 
         # 1. Tasks whose retry_after_at has passed (manual_token_fix excluded by storage)
         ready_tasks = self.storage.list_paused_sdlc_tasks(now)
+        ready_count = len(ready_tasks)
 
         # 2. Build active cooldown index: (provider, model) → retry_after_at
+        active_cooldowns = self.storage.get_active_provider_cooldowns(now)
         active_cds: dict[tuple, str] = {
             (cd["provider"], cd["model"]): cd["retry_after_at"]
-            for cd in self.storage.get_active_provider_cooldowns(now)
+            for cd in active_cooldowns
         }
 
         requeued: list[str] = []
@@ -144,6 +170,9 @@ class RecoveryWorker:
         if not self.dry_run:
             pruned = self.storage.prune_expired_cooldowns(now)
 
+        # 4. Count all paused tasks (for runtime_status.json)
+        paused_count = self._count_all_paused()
+
         stats = {
             "timestamp": now[:19],
             "requeued":  requeued,
@@ -159,9 +188,20 @@ class RecoveryWorker:
                 + (" [DRY RUN]" if self.dry_run else "")
             )
 
-        return stats
+        return stats, paused_count, ready_count, active_cooldowns
 
     # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _count_all_paused(self) -> int:
+        """Count total paused tasks in DB (all policies, all retry times)."""
+        try:
+            import sqlite3 as _sq
+            with _sq.connect(self.storage.db_path) as conn:
+                return conn.execute(
+                    "SELECT COUNT(*) FROM sdlc_tasks WHERE status='paused'"
+                ).fetchone()[0]
+        except Exception:
+            return 0
 
     @staticmethod
     def _provider_cooldown_for(task, active_cds: dict) -> str:
@@ -198,8 +238,8 @@ def _get_storage() -> Storage:
 
 async def run_once(dry_run: bool = False):
     worker = RecoveryWorker(_get_storage(), dry_run=dry_run)
-    stats = await worker.tick()
-    _record_tick(stats)
+    stats, paused_count, ready_count, cooldowns = await worker.tick()
+    _record_tick(stats, paused_count, ready_count, cooldowns)
     label = "[DRY RUN] " if dry_run else ""
     print(
         f"{label}requeued={len(stats['requeued'])} "
@@ -217,13 +257,13 @@ async def run_forever(poll_seconds: int):
     worker = RecoveryWorker(_get_storage())
 
     # Run immediately on startup
-    stats = await worker.tick()
-    _record_tick(stats)
+    stats, paused_count, ready_count, cooldowns = await worker.tick()
+    _record_tick(stats, paused_count, ready_count, cooldowns)
 
     while True:
         await asyncio.sleep(poll_seconds)
-        stats = await worker.tick()
-        _record_tick(stats)
+        stats, paused_count, ready_count, cooldowns = await worker.tick()
+        _record_tick(stats, paused_count, ready_count, cooldowns)
 
 
 # ─── Entry point ─────────────────────────────────────────────────────────────

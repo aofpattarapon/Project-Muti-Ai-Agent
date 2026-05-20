@@ -18,10 +18,21 @@
   - ecosystem.bots.config.js: sdlc-quota-recovery process registered
   - scripts/start_pm2.sh: --no-cron still starts sdlc-quota-recovery (runtime safety, not cron)
 
-  Next phase:
-  - Phase 9: Runtime Observability & Operator Control Plane
-  - Roadmap: docs/PHASE9_ROADMAP.md (design locked, ready for 9.1 implementation)
-  - Sub-phases: 9.1 Backend APIs → 9.2 Recovery Dashboard UI → 9.3 Audit Trail → 9.4 hermes3 hardening
+  Phase 9 progress:
+  - 9.0: docs/PHASE9_ROADMAP.md (design locked — committed)
+  - 9.1 COMPLETE: Recovery status APIs (backend)
+      Python: recovery_worker.tick() → runtime_status.json + tick_history.json (already written in 8.2; 9.1 adds _write_runtime_status, _count_all_paused, tick() returns tuple)
+      webapp/lib/agents/query.ts: listPausedTaskEvents(), upsertResumeRequestFlag()
+      webapp/lib/audit/events.ts: AuditEventType += "agent.task.resumed.web"
+      webapp/app/api/runtime/paused-tasks/route.ts: GET — Bearer auth, returns latest pause event per sdlc_task_id
+      webapp/app/api/runtime/paused-tasks/[sdlcTaskId]/resume/route.ts: POST — Admin session, writes system_config flag (Python consumer in 9.3)
+      webapp/app/api/runtime/cooldowns/route.ts: GET — Bearer auth, reads outputs/recovery/runtime_status.json
+      webapp/app/api/runtime/recovery/route.ts: GET — Bearer auth, reads outputs/recovery/tick_history.json newest-first
+      webapp/tests/runtime-phase9.test.ts: 13 tests (all green)
+      All 128 TypeScript + 11 Python recovery tests green
+  - Next: 9.2 Recovery Dashboard UI → 9.3 Audit Trail → 9.4 hermes3 hardening
+
+  Roadmap: docs/PHASE9_ROADMAP.md
 
   Important concept:
   - Discord is primary runtime

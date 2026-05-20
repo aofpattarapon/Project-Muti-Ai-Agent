@@ -1415,6 +1415,76 @@ export function listTaskStates(opts: {
   }));
 }
 
+// ─── Phase 9.1: Paused Task Events ───────────────────────────────────────────
+
+export type PausedTaskEvent = {
+  sdlcTaskId: string;
+  taskName: string;
+  roleKey: string;
+  projectId: string;
+  pauseReason: string;
+  pauseProvider: string;
+  pauseModel: string;
+  retryAfterAt: string;
+  resumePolicy: string;
+  pausedAt: string;
+};
+
+export function listPausedTaskEvents(limit = 100): PausedTaskEvent[] {
+  const rows = db
+    .prepare(
+      `SELECT id, role_key, task_name, sdlc_task_id, project_id, metadata, created_at
+       FROM agent_activity_logs
+       WHERE status = 'paused' AND sdlc_task_id != ''
+         AND id IN (
+           SELECT MAX(id) FROM agent_activity_logs
+           WHERE status = 'paused' AND sdlc_task_id != ''
+           GROUP BY sdlc_task_id
+         )
+       ORDER BY id DESC LIMIT ?`,
+    )
+    .all(limit) as Array<{
+    id: number;
+    role_key: string;
+    task_name: string;
+    sdlc_task_id: string;
+    project_id: string;
+    metadata: string;
+    created_at: string;
+  }>;
+
+  return rows.map((row) => {
+    let meta: Record<string, string> = {};
+    try {
+      meta = JSON.parse(row.metadata ?? "{}") as Record<string, string>;
+    } catch {}
+    return {
+      sdlcTaskId: row.sdlc_task_id,
+      taskName: row.task_name,
+      roleKey: row.role_key,
+      projectId: row.project_id ?? "",
+      pauseReason: meta["pause_reason"] ?? "",
+      pauseProvider: meta["pause_provider"] ?? "",
+      pauseModel: meta["pause_model"] ?? "",
+      retryAfterAt: meta["retry_after_at"] ?? "",
+      resumePolicy: meta["resume_policy"] ?? "auto",
+      pausedAt: row.created_at,
+    };
+  });
+}
+
+// Writes system_config flag key=runtime.resume_requested.{sdlcTaskId} so Python can poll it.
+// Python consumer: BaseAgent poll loop (Phase 9.3). Flag is cleared by Python after acting on it.
+export function upsertResumeRequestFlag(sdlcTaskId: string, operatorUser: string): void {
+  const key = `runtime.resume_requested.${sdlcTaskId}`;
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO system_configs (config_key, category, value, description, updated_at)
+     VALUES (?, 'runtime', ?, 'Operator-requested resume via web', ?)
+     ON CONFLICT(config_key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+  ).run(key, operatorUser, now);
+}
+
 export function listBlockedEvents(opts: { roleKey?: string; limit?: number }): AgentActivityLogRecord[] {
   const limit = opts.limit ?? 50;
   const rows = opts.roleKey

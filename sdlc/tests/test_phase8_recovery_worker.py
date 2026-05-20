@@ -55,11 +55,11 @@ class RecoveryWorkerTest(unittest.TestCase):
             "task-expired", "rate_limited", "groq", "groq/llama-3.3-70b", _past(5)
         )
 
-        result = asyncio.run(self.worker.tick())
+        stats, _, _, _ = asyncio.run(self.worker.tick())
 
         task = self.storage.get_sdlc_task("task-expired")
         self.assertEqual(task.status, "pending")
-        self.assertEqual(result["requeued"], ["task-expired"])
+        self.assertEqual(stats["requeued"], ["task-expired"])
         self.assertEqual(task.pause_reason, "")
         self.assertEqual(task.retry_after_at, "")
 
@@ -69,11 +69,11 @@ class RecoveryWorkerTest(unittest.TestCase):
             "task-future", "rate_limited", "groq", "groq/llama-3.3-70b", _future(3600)
         )
 
-        result = asyncio.run(self.worker.tick())
+        stats, _, _, _ = asyncio.run(self.worker.tick())
 
         task = self.storage.get_sdlc_task("task-future")
         self.assertEqual(task.status, "paused")
-        self.assertEqual(result["requeued"], [])
+        self.assertEqual(stats["requeued"], [])
 
     def test_run_once_never_requeues_manual_token_fix(self):
         self._insert_task("task-manual")
@@ -86,26 +86,26 @@ class RecoveryWorkerTest(unittest.TestCase):
             resume_policy="manual_token_fix",
         )
 
-        result = asyncio.run(self.worker.tick())
+        stats, _, _, _ = asyncio.run(self.worker.tick())
 
         task = self.storage.get_sdlc_task("task-manual")
         self.assertEqual(task.status, "paused")
-        self.assertEqual(result["requeued"], [])
+        self.assertEqual(stats["requeued"], [])
 
     def test_run_once_clears_expired_provider_cooldown(self):
         self.storage.set_provider_cooldown("groq", "groq/llama-3.3-70b", "rate_limited", _past(5))
 
-        result = asyncio.run(self.worker.tick())
+        stats, _, _, _ = asyncio.run(self.worker.tick())
 
-        self.assertEqual(result["pruned"], 1)
+        self.assertEqual(stats["pruned"], 1)
         self.assertEqual(self.storage.get_active_provider_cooldowns(), [])
 
     def test_run_once_keeps_active_provider_cooldown(self):
         self.storage.set_provider_cooldown("groq", "groq/llama-3.3-70b", "rate_limited", _future(3600))
 
-        result = asyncio.run(self.worker.tick())
+        stats, _, _, _ = asyncio.run(self.worker.tick())
 
-        self.assertEqual(result["pruned"], 0)
+        self.assertEqual(stats["pruned"], 0)
         self.assertEqual(len(self.storage.get_active_provider_cooldowns()), 1)
 
     def test_run_once_defers_when_provider_cooldown_still_active(self):
@@ -116,13 +116,13 @@ class RecoveryWorkerTest(unittest.TestCase):
         )
         self.storage.set_provider_cooldown("groq", "groq/llama-3.3-70b", "rate_limited", retry_at)
 
-        result = asyncio.run(self.worker.tick())
+        stats, _, _, _ = asyncio.run(self.worker.tick())
 
         task = self.storage.get_sdlc_task("task-deferred")
         self.assertEqual(task.status, "paused")
         self.assertEqual(task.retry_after_at, retry_at)
-        self.assertEqual(result["deferred"], ["task-deferred"])
-        self.assertEqual(result["requeued"], [])
+        self.assertEqual(stats["deferred"], ["task-deferred"])
+        self.assertEqual(stats["requeued"], [])
 
     def test_dry_run_does_not_mutate_ready_task(self):
         self._insert_task("task-dry")
@@ -131,12 +131,12 @@ class RecoveryWorkerTest(unittest.TestCase):
         )
         dry_worker = RecoveryWorker(storage=self.storage, dry_run=True)
 
-        result = asyncio.run(dry_worker.tick())
+        stats, _, _, _ = asyncio.run(dry_worker.tick())
 
         task = self.storage.get_sdlc_task("task-dry")
         self.assertEqual(task.status, "paused")
-        self.assertEqual(result["requeued"], ["task-dry"])
-        self.assertTrue(result["dry_run"])
+        self.assertEqual(stats["requeued"], ["task-dry"])
+        self.assertTrue(stats["dry_run"])
 
     def test_worker_does_not_claim_or_execute_tasks(self):
         self._insert_task("task-expired")
